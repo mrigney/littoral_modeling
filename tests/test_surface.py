@@ -1,0 +1,477 @@
+"""PHASE 3 -- Gate 2: FFT surface synthesis.
+
+Two checks here earn their keep by catching errors nothing else catches:
+
+`test_crest_travels_at_phase_speed`
+    The time-evolution sign error leaves the surface exactly real, with the
+    right variance, the right spectrum and the right slopes -- the sea simply
+    marches backwards into the wind. Tracking a crest is the only check that
+    sees it.
+
+`test_displacement_compresses_at_crests`
+    The horizontal displacement sign error inverts crests and troughs while
+    preserving every scalar statistic. Measuring compression against elevation
+    is the only check that sees it.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+import pytest
+from scipy.stats import kurtosis, skew
+
+from pywave import moments, spectrum, surface, tiling
+
+pytestmark = pytest.mark.gate2
+
+
+def _jacobian_weighted_moments(h: np.ndarray, j: np.ndarray):
+    """Skewness/kurtosis of elevation over uniform *horizontal area*.
+
+    The displacement map sends a grid cell of area `dA` to `J dA`, so the
+    elevation seen at a uniformly random horizontal position is the grid
+    elevation weighted by `J`. Validated against explicit resampling of a
+    trochoid: for a single mode at `ka = 0.47` both give +0.508.
+    """
+    w = j.ravel()
+    w = w / w.sum()
+    x = h.ravel()
+    mu = np.sum(w * x)
+    var = np.sum(w * (x - mu) ** 2)
+    sd = np.sqrt(var)
+    return float(np.sum(w * (x - mu) ** 3) / sd**3), float(np.sum(w * (x - mu) ** 4) / var**2 - 3.0)
+
+
+# ---------------------------------------------------------------------------
+# Realness and Hermitian symmetry
+# ---------------------------------------------------------------------------
+
+
+def test_surface_is_real(record, tileset):
+    """`max|imag| < 1e-9` -- the Hermitian symmetry `flip_k` enforces."""
+    worst = 0.0
+    for tile in tileset.tiles:
+        for t in (0.0, 3.7):
+            raw = np.fft.ifft2(surface.evolve(tile.h0, tile.omega, t)) * tile.n**2
+            worst = max(worst, float(np.max(np.abs(raw.imag))))
+
+    record("2", "max |imag(h)| over all tiles, t = 0 and 3.7 s", worst, 0.0, 1e-9,
+           unit="m", note="Elevations are ~0.04 m, so this is at the float64 noise floor.",
+           passed=worst < 1e-9)
+    assert worst < 1e-9
+
+
+def test_flip_k_maps_each_bin_to_its_negative():
+    """`flip_k(a)[i, j] == a[-i % N, -j % N]`, DC included.
+
+    The off-by-one hides in the wrap: reversing maps `j -> N-1-j`, so the roll by
+    +1 is what lands it on `N-j`. Nyquist rows are their own negatives on an even
+    grid, so a wrong implementation nearly works -- checking every bin is the
+    point.
+    """
+    rng = np.random.default_rng(0)
+    for n in (8, 16, 32):
+        a = rng.standard_normal((n, n)) + 1j * rng.standard_normal((n, n))
+        flipped = surface.flip_k(a)
+        i, j = np.meshgrid(np.arange(n), np.arange(n), indexing="ij")
+        assert np.array_equal(flipped, a[(-i) % n, (-j) % n])
+        assert flipped[0, 0] == a[0, 0]
+
+
+# ---------------------------------------------------------------------------
+# Variance
+# ---------------------------------------------------------------------------
+
+
+def test_single_tile_hs_matches_spectrum(record, scene):
+    """`4*std(h)` matches the band-limited spectral Hs within 5%.
+
+    Compared against the theory *over the band this tile resolves*, which is the
+    only fair comparison: a grid truncated at its Nyquist genuinely carries less
+    variance than the untruncated spectrum, and comparing against the latter
+    would look like a bug when it is just missing high-frequency content.
+    """
+    u10, fetch, gamma, theta_wind = scene
+    size, n = 128.0, 1024
+    tile = surface.WaveTile.build(size, n, u10, fetch, theta_wind, seed=20260801)
+
+    realised = 4.0 * float(np.std(tile.evaluate(0.0).h))
+    grid = 4.0 * np.sqrt(tile.m0())
+    band = 4.0 * np.sqrt(moments.mss_between(2.0 * np.pi / size, tile.k_nyquist,
+                                             u10, fetch, gamma=gamma, order=0))
+    full = spectrum.hs_spectral(u10, fetch, gamma)
+
+    rel_band = abs(realised - band) / band
+    rel_full = abs(realised - full) / full
+
+    record("2", f"Hs realised, single tile L={size:.0f} m N={n}", realised, band, 0.05,
+           unit="m", note=f"Band-limited theory over k in "
+                          f"[{2 * np.pi / size:.3f}, {tile.k_nyquist:.2f}] rad/m. "
+                          f"Grid sum gives {grid:.5f} m; untruncated spectrum {full:.5f} m "
+                          f"({100 * (realised / full - 1):+.1f}%).",
+           passed=rel_band < 0.05)
+    record("2", "Hs realised vs untruncated spectral Hs", realised, full, 0.05, unit="m",
+           passed=rel_full < 0.05)
+
+    assert rel_band < 0.05
+    assert rel_full < 0.05
+
+
+def test_composite_hs_matches_spectrum(record, scene, tileset, tileset_fields, sample_points):
+    """The three-tile composite also matches Hs within 5%."""
+    u10, fetch, gamma, _ = scene
+    x, y = sample_points
+    field = tileset.sample(x, y, 0.0, fields=tileset_fields)
+
+    realised = 4.0 * float(np.std(field.h))
+    grid = tileset.hs()
+    band = 4.0 * np.sqrt(moments.mss_between(moments.K_MIN_DEFAULT, tileset.k_max,
+                                             u10, fetch, gamma=gamma, order=0))
+    rel = abs(realised - band) / band
+
+    record("2", "Hs realised, 3-tile composite", realised, band, 0.05, unit="m",
+           note=f"{x.size} scattered world points, cubic sampling. Grid sum of the "
+                f"three disjoint bands gives {grid:.5f} m. The "
+                f"{100 * (realised / grid - 1):+.1f}% shortfall is interpolation loss.",
+           passed=rel < 0.05)
+    record("2", "composite band edges", str([f"[{t.band[0]:.2f}, {t.band[1]:.2f})"
+                                             for t in tileset.tiles]), unit="rad/m")
+    assert rel < 0.05
+
+
+def test_disjoint_bands_sum_to_the_total(record, scene, tileset):
+    """Tile variances add, because the bands do not overlap."""
+    u10, fetch, gamma, _ = scene
+    summed = sum(t.m0() for t in tileset.tiles)
+    band = moments.mss_between(moments.K_MIN_DEFAULT, tileset.k_max,
+                               u10, fetch, gamma=gamma, order=0)
+    rel = abs(summed - band) / band
+
+    record("2", "sum of per-tile m0 vs band-limited theory", summed, band, 0.01, unit="m^2",
+           note="Variances add only for uncorrelated components; this is what "
+                "makes the disjoint-band construction valid.",
+           passed=rel < 0.01)
+    assert rel < 0.01
+
+
+# ---------------------------------------------------------------------------
+# Slope and the LOD invariant
+# ---------------------------------------------------------------------------
+
+
+def test_resolved_mss_matches_band_limited_theory(record, scene, tileset, tileset_fields,
+                                                  sample_points):
+    """`mean(slope_x^2 + slope_y^2)` matches `mss_above(0) - mss_above(k_max)` within 10%."""
+    u10, fetch, gamma, _ = scene
+    theory = (moments.mss_above(0.0, u10, fetch, gamma=gamma)
+              - moments.mss_above(tileset.k_max, u10, fetch, gamma=gamma))
+
+    grid = tileset.mss()
+    x, y = sample_points
+    realised = tileset.sample(x, y, 0.0, fields=tileset_fields).mss_resolved()
+
+    rel_grid = abs(grid - theory) / theory
+    rel_real = abs(realised - theory) / theory
+
+    record("2", "resolved mss, grid sum", grid, theory, 0.01, passed=rel_grid < 0.01)
+    record("2", "resolved mss, realised from samples", realised, theory, 0.10,
+           note=f"{100 * (realised / grid - 1):+.1f}% below the grid sum -- cubic "
+                f"interpolation attenuates the top octave, which is where most "
+                f"slope variance lives.",
+           passed=rel_real < 0.10)
+    assert rel_grid < 0.01
+    assert rel_real < 0.10
+
+
+def test_lod_invariant(record, scene, tileset):
+    """`mss_resolved(dx) + mss_above(pi/dx) = mss_total`.
+
+    Cookbook section 6.4. This is what keeps appearance constant across LOD
+    transitions: geometry lost when the mesh coarsens reappears as BSDF
+    roughness, and the total radiometric response is unchanged.
+    """
+    u10, fetch, gamma, _ = scene
+    total = moments.mss_above(0.0, u10, fetch, gamma=gamma)
+
+    resolved = tileset.mss()
+    above = moments.mss_above(tileset.k_max, u10, fetch, gamma=gamma)
+    rel = abs(resolved + above - total) / total
+
+    record("2", "LOD invariant: mss_resolved + mss_above(k_max)", resolved + above, total, 1e-3,
+           note=f"resolved = {resolved:.5f} (k < {tileset.k_max:.2f} rad/m), "
+                f"sub-grid = {above:.5f}, i.e. {100 * above / total:.0f}% of the "
+                f"total slope variance is below the composite's resolution and is "
+                f"carried by the BSDF.",
+           passed=rel < 1e-3)
+    assert rel < 1e-3
+
+    # ... and across a range of mesh spacings, which is what LOD actually varies.
+    worst = 0.0
+    for dx in (0.0625, 0.125, 0.25, 0.5, 1.0, 2.0):
+        k_cut = np.pi / dx
+        lo = moments.mss_between(moments.K_MIN_DEFAULT, k_cut, u10, fetch, gamma=gamma, order=2)
+        hi = moments.mss_above(k_cut, u10, fetch, gamma=gamma)
+        worst = max(worst, abs(lo + hi - total) / total)
+
+    record("2", "LOD invariant, worst over mesh_dx 0.0625-2 m", worst, 0.0, 1e-6,
+           note="Analytic split; exact by construction, so this is a guard against "
+                "the two integrals drifting apart in future refactors.",
+           passed=worst < 1e-6)
+    assert worst < 1e-6
+
+
+# ---------------------------------------------------------------------------
+# Distribution
+# ---------------------------------------------------------------------------
+
+
+def test_height_distribution_is_gaussian(record, scene, tileset, tileset_fields,
+                                         sample_points):
+    """The linear surface is Gaussian; the displaced one is reported, not bounded.
+
+    Replaces the cookbook's "skewness in [0, 0.3] with choppiness on", which this
+    model cannot produce -- see Gate deviations in the report.
+    """
+    u10, fetch, gamma, theta_wind = scene
+    x, y = sample_points
+    h = tileset.sample(x, y, 0.0, fields=tileset_fields).h
+
+    sk = float(skew(h))
+    ku = float(kurtosis(h))
+
+    record("2", "skewness of h (linear surface)", sk, 0.0, 0.05,
+           note="Gaussian by construction: independent normal amplitude draws "
+                "summed over modes. A non-zero value here would mean the "
+                "amplitude draw or the Hermitian symmetry is wrong.",
+           passed=abs(sk) < 0.05)
+    record("2", "excess kurtosis of h (linear surface)", ku, 0.0, 0.1, passed=abs(ku) < 0.1)
+
+    # Displaced surface, area-weighted. Reported, not bounded.
+    #
+    # Measured on a single *full-band* tile rather than the band-limited members
+    # of the composite: elevation skewness is a property of the whole surface,
+    # and a tile carrying only [7.6, 15.2) rad/m has no meaningful elevation
+    # distribution of its own.
+    full = surface.WaveTile.build(64.0, 512, u10, fetch, theta_wind,
+                                  seed=20260801, gamma=gamma)
+    field = full.evaluate(0.0)
+    for chop in (0.0, 1.0, 1.5):
+        s, _ = _jacobian_weighted_moments(field.h, full.jacobian(0.0, chop))
+        record("2", f"skewness of displaced surface, choppiness = {chop}", s,
+               note="Full-band tile, area-weighted by the displacement Jacobian. "
+                    "Near zero because the model is linear in elevation; the "
+                    "positive skewness of a real sea comes from second-order Stokes "
+                    "terms that are not modelled.")
+
+    assert abs(sk) < 0.05
+    assert abs(ku) < 0.1
+
+
+# ---------------------------------------------------------------------------
+# Displacement
+# ---------------------------------------------------------------------------
+
+
+def test_jacobian_has_no_folds_at_physical_choppiness(record, tileset):
+    """`det(I + lambda dD/dx) > 0` at `choppiness = 1.0`.
+
+    Negative values mean the surface has folded through itself and normals have
+    inverted -- radiometric nonsense. At 8 cm wave heights it should not happen.
+    """
+    worst = np.inf
+    for tile in tileset.tiles:
+        for t in (0.0, 1.3, 7.9):
+            worst = min(worst, float(tile.jacobian(t, 1.0).min()))
+
+    record("2", "min Jacobian determinant, choppiness = 1.0", worst, note=(
+        "Over three tiles and three times. Must stay > 0; values below 1 are "
+        "compression, which is what sharpens crests."), passed=worst > 0.0)
+    assert worst > 0.0
+
+
+def test_displacement_compresses_at_crests(record, tileset):
+    """Compression must coincide with crests, i.e. `corr(J - 1, h) < 0`.
+
+    Pins the sign of the horizontal displacement transfer function. The cookbook
+    writes `-1j`; with numpy's `+ikx` synthesis that broadens crests and sharpens
+    troughs, inverting the profile while leaving every scalar statistic intact.
+    """
+    worst = -np.inf
+    for tile in tileset.tiles:
+        field = tile.evaluate(0.0)
+        j = tile.jacobian(0.0, 1.0)
+        c = float(np.corrcoef((j - 1.0).ravel(), field.h.ravel())[0, 1])
+        worst = max(worst, c)
+
+    record("2", "worst corr(J - 1, h) over tiles", worst, note=(
+        "Negative means the surface compresses where elevation is high, i.e. "
+        "crests sharpen and troughs broaden, as in a Gerstner trochoid."),
+        passed=worst < 0.0)
+    assert worst < 0.0
+
+
+# ---------------------------------------------------------------------------
+# Propagation
+# ---------------------------------------------------------------------------
+
+
+def test_crest_travels_at_phase_speed(record):
+    """A tracked crest moves at `c = omega/k` within 5%, in the +k direction.
+
+    The check that catches the time-evolution sign error. With the cookbook's
+    `e^(+i omega t)` the measured speed is `-c`: the surface is still exactly
+    real, still has the right variance and spectrum, and marches into the wind.
+    """
+    size, n, mode = 64.0, 256, 4
+    kx, ky, k, _ = surface.grid_wavenumbers(size, n)
+
+    h0 = np.zeros((n, n), dtype=complex)
+    h0[0, mode] = 1.0
+    omega = spectrum.dispersion_omega(k)
+
+    k_mode = float(k[0, mode])
+    c_theory = float(omega[0, mode]) / k_mode
+    dx = size / n
+
+    def crest_x(t: float) -> float:
+        row = surface.surface_at(h0, kx, ky, k, omega, t).h[0]
+        i = int(np.argmax(row))
+        a, b, cc = row[(i - 1) % n], row[i], row[(i + 1) % n]
+        return (i + 0.5 * (a - cc) / (a - 2 * b + cc)) * dx
+
+    dt = 0.05
+    measured = ((crest_x(dt) - crest_x(0.0)) % size) / dt
+    rel = abs(measured - c_theory) / c_theory
+
+    record("2", "crest phase speed", measured, c_theory, 0.05, unit="m/s",
+           note=f"Single mode, k = {k_mode:.4f} rad/m, along +x. A sign error in the "
+                f"time evolution would give {-c_theory:.4f} m/s.",
+           passed=rel < 0.05)
+    assert rel < 0.05
+    assert measured > 0.0
+
+
+@pytest.mark.slow
+def test_zero_crossing_period_from_time_series(record, scene):
+    """Tz measured by counting zero crossings matches theory within 10%.
+
+    Band-limited to what the grid resolves. The untruncated Tz is 0.816 s against
+    a measured 0.91 s -- an 11.7% "failure" that is entirely the missing
+    high-frequency content, which is why the comparison must be banded.
+    """
+    u10, fetch, gamma, theta_wind = scene
+    tile = surface.WaveTile.build(64.0, 256, u10, fetch, theta_wind, seed=20260801)
+
+    dt, duration = 1.0 / 24.0, 48.0
+    times = np.arange(0.0, duration, dt)
+    probes = np.arange(0, tile.n, 16)
+
+    series = np.empty((times.size, probes.size, probes.size))
+    for i, t in enumerate(times):
+        h = np.real(np.fft.ifft2(surface.evolve(tile.h0, tile.omega, t)) * tile.n**2)
+        series[i] = h[np.ix_(probes, probes)]
+
+    a = series.reshape(times.size, -1)
+    a = a - a.mean(axis=0, keepdims=True)
+    sign = np.signbit(a)
+    crossings = np.count_nonzero(sign[1:] != sign[:-1], axis=0)
+    measured = float(np.mean(2.0 * duration / crossings))
+
+    f_lo = float(spectrum.dispersion_omega(2.0 * np.pi / tile.size) / (2.0 * np.pi))
+    f_hi = float(spectrum.dispersion_omega(tile.k_nyquist) / (2.0 * np.pi))
+    banded = moments.zero_crossing_period(u10, fetch, gamma, f_lo=f_lo, f_hi=f_hi)
+    full = moments.zero_crossing_period(u10, fetch, gamma)
+    rel = abs(measured - banded) / banded
+
+    record("2", "Tz from zero crossings", measured, banded, 0.10, unit="s",
+           note=f"{probes.size**2} probe points, {duration:.0f} s at {1 / dt:.0f} Hz, "
+                f"{crossings.sum()} crossings. Theory banded to k in "
+                f"[{2 * np.pi / tile.size:.3f}, {tile.k_nyquist:.2f}] rad/m. Against the "
+                f"untruncated Tz of {full:.3f} s the error would be "
+                f"{100 * abs(measured - full) / full:.1f}%.",
+           passed=rel < 0.10)
+    assert rel < 0.10
+
+
+# ---------------------------------------------------------------------------
+# Tiling and sampling
+# ---------------------------------------------------------------------------
+
+
+def test_cubic_sampling_beats_bilinear(record, tileset, tileset_fields, sample_points):
+    """Bilinear interpolation destroys top-octave variance; cubic mostly does not."""
+    x, y = sample_points
+    grid = tileset.hs()
+    hs_cubic = 4.0 * float(np.std(tileset.sample(x, y, 0.0, fields=tileset_fields, order=3).h))
+    hs_linear = 4.0 * float(np.std(tileset.sample(x, y, 0.0, fields=tileset_fields, order=1).h))
+
+    loss_cubic = 1.0 - hs_cubic / grid
+    loss_linear = 1.0 - hs_linear / grid
+
+    record("2", "Hs loss, cubic sampling (order=3)", loss_cubic, 0.0, 0.03,
+           note=f"Bilinear (order=1) loses {100 * loss_linear:.1f}% for comparison. "
+                f"At the Nyquist, bilinear retains only 1/3 of the power.",
+           passed=loss_cubic < 0.03)
+    assert loss_cubic < 0.03
+    assert loss_cubic < loss_linear
+
+
+def test_band_edges_reject_unrepresentable_bands(cfg):
+    """A band falling outside its tile's resolvable range raises, not clips.
+
+    Only the *lower* guard is reachable. Because `k_ref` is defined as the
+    minimum Nyquist across tiles, an interior edge `frac * k_ref` can never
+    exceed the Nyquist of the tile carrying it, and the topmost band is pinned to
+    its own tile's Nyquist by construction -- so the upper guard in
+    `band_edges` cannot fire as `k_ref` is currently defined. It is left in place
+    as a tripwire against a future change to that definition.
+    """
+    from pywave.config import TileConfig
+
+    good = tiling.band_edges(cfg.surface.tiles)
+    assert len(good) == len(cfg.surface.tiles)
+    for (lo, hi), tc in zip(good, cfg.surface.tiles):
+        assert hi <= tc.k_nyquist * (1 + 1e-12)
+        assert lo < hi
+
+    # A tile too small to reach down to the band it was handed: k_min = 6.28
+    # rad/m, but the band it is assigned starts at 0.1 * 25.13 = 2.51 rad/m.
+    bad = (
+        TileConfig(size=64.0, n=512, band=(0.0, 0.1)),
+        TileConfig(size=1.0, n=64, band=(0.1, 1.0)),
+    )
+    with pytest.raises(ValueError, match="but its band starts at"):
+        tiling.band_edges(bad)
+
+
+def test_tile_rotations_are_deterministic_and_spread():
+    """Rotations come from the tile index, not the RNG."""
+    assert tiling.tile_rotations(3) == tiling.tile_rotations(3)
+    r = np.array(tiling.tile_rotations(8))
+    assert np.all(np.diff(np.sort(r)) > 0.1)
+
+
+def test_composite_rotates_vectors_back_to_world(cfg, scene):
+    """Slopes must come back out of the tile frame.
+
+    A tile evaluated with rotation phi and sampled through the composite must
+    give the same world-frame slope as the same tile at rotation 0. Forgetting
+    the back-rotation leaves `mss` correct but points the anisotropy the wrong
+    way -- invisible to every scalar check.
+    """
+    u10, fetch, _, theta_wind = scene
+    x = np.linspace(0.0, 40.0, 512)
+    y = np.full_like(x, 7.0)
+
+    plain = surface.WaveTile.build(64.0, 256, u10, fetch, theta_wind, seed=7, rotation=0.0)
+    turned = surface.WaveTile.build(64.0, 256, u10, fetch, theta_wind, seed=7,
+                                    rotation=0.7)
+
+    a = tiling.composite_surface([plain], x, y, 0.0)
+    b = tiling.composite_surface([turned], x, y, 0.0)
+
+    # Same wind, same seed, same band: the directional statistics must agree even
+    # though the underlying lattices differ.
+    ang_a = np.arctan2(np.mean(a.slope_y**2), np.mean(a.slope_x**2))
+    ang_b = np.arctan2(np.mean(b.slope_y**2), np.mean(b.slope_x**2))
+    assert abs(ang_a - ang_b) < 0.25

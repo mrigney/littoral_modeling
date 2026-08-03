@@ -1,0 +1,48 @@
+{
+  "generated": "2026-08-03 05:27:55 UTC",
+  "git_sha": "ea87caeb0b82dc093ddfdf226f11216bc0cedf74",
+  "pywave_version": "0.1.0",
+  "python": "3.14.5",
+  "numpy": "2.5.1",
+  "platform": "Windows AMD64",
+  "scene": {
+    "seed": 20260801,
+    "t": 2.5,
+    "u10": 5.0,
+    "fetch": 1000.0,
+    "theta_wind_rad": 0.7853981633974483,
+    "gamma": 3.3
+  },
+  "tile": {
+    "size": 64.0,
+    "n": 128,
+    "fields": [
+      "h",
+      "slope_x",
+      "slope_y"
+    ],
+    "shape": [
+      3,
+      128,
+      128
+    ],
+    "sha256": "129a047ecfd6fa8814d9b3d1f48931603a58e03acf47898401c913240c45c3ea",
+    "hs": 0.07689654713992197
+  },
+  "composite": {
+    "n_probes": 1024,
+    "fields": [
+      "h",
+      "dx_disp",
+      "dy_disp",
+      "slope_x",
+      "slope_y"
+    ],
+    "shape": [
+      5,
+      1024
+    ],
+    "sha256": "065d41de22c6e180194c7b5ba2ebf6095366c92bee03a545a82f6fa02d764784",
+    "hs": 0.08097207212083143
+  }
+}

@@ -12,11 +12,13 @@ Phase status
 ------------
 Phase 1 (spectrum, moments)        implemented
 Phase 2 (surface, tiling)          implemented
-Phase 3 (validation suite)         NOT started -- the Gate 1 and Gate 2 checks
-                                   named throughout these docstrings are
-                                   specified in the cookbook but are not yet
-                                   automated.  ``tests/`` and
-                                   ``docs/validation_report.md`` do not exist.
+Phase 3 (validation suite)         implemented -- ``tests/`` automates the
+                                   Gate 1 and Gate 2 checks referenced
+                                   throughout these docstrings and generates
+                                   ``docs/validation_report.md``.  Two gate
+                                   criteria are provably unmeetable and carry
+                                   substituted criteria; see the "Gate
+                                   deviations" section of that report.
 Phase 4+ (nearshore, mesh, BSDF)   not started
 
 See ``docs/users_guide.md`` for the user-facing documentation.

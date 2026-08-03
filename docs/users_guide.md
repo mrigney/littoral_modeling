@@ -22,6 +22,7 @@ and **Phase 2 (FFT surface synthesis and tiling)**. Phases 3+ are listed under
 10. [Known gotchas](#10-known-gotchas)
 11. [Where the physics comes from](#11-where-the-physics-comes-from)
 12. [Roadmap](#12-roadmap)
+13. [Validating a build](#13-validating-a-build)
 
 ---
 
@@ -56,7 +57,7 @@ independently.
 ### What it does not do yet
 
 No nearshore transformation (shoaling, refraction, breaking), no foam, no mesh
-export, no BSDF, no emissivity, and **no test suite**. See [Roadmap](#12-roadmap).
+export, no BSDF, no emissivity. See [Roadmap](#12-roadmap).
 
 ---
 
@@ -715,7 +716,7 @@ Project-internal: `water-surface-modeling-primer.md` (the physics rationale) and
 |---|---|---|
 | 1 | `spectrum.py`, `moments.py` | **Implemented** |
 | 2 | `surface.py`, `tiling.py` | **Implemented** |
-| 3 | `tests/`, `docs/validation_report.md` | **Not started** — Gate 1/2 checks are not automated |
+| 3 | `tests/`, `docs/validation_report.md` | **Implemented** — 46 checks, see [Validating a build](#13-validating-a-build) |
 | 4 | Terrain and lake basin in Houdini | Not started |
 | 5 | `nearshore.py`, `foam.py` — shoaling, refraction, breaking | Not started |
 | 6 | `mesh.py`, `channels.py`, `export.py` — displaced mesh, LOD | Not started |
@@ -724,7 +725,64 @@ Project-internal: `water-surface-modeling-primer.md` (the physics rationale) and
 | 9 | EMBER integration | Not started |
 | 10 | Validation and documentation | Not started |
 
-Phase 3 is the immediate next step. The gate criteria in the cookbook are already
-written; the config keys for phases 5 and 6 (`nearshore`, `output`) already parse
-and validate, so those sections of a scene file are stable ahead of the code that
-consumes them.
+Phase 4 (terrain) and Phase 5 (nearshore) are the next steps. The config keys for
+phases 5 and 6 (`nearshore`, `output`) already parse and validate, so those
+sections of a scene file are stable ahead of the code that consumes them.
+
+---
+
+## 13. Validating a build
+
+```bash
+pytest                      # 46 checks, ~34 s
+pytest -m gate1             # spectrum and moments only
+pytest -m "not slow"        # skips the 14 s zero-crossing time series
+```
+
+Running the suite regenerates **[validation_report.md](validation_report.md)**,
+which is the V&V artifact — a table of every measured quantity against the
+reference it was judged on, with a `git_sha` header. Tests record numbers, not
+just pass/fail, because a reviewer needs "realised Hs = 0.0842 m vs 0.0853 m,
+−1.3%" rather than a green checkmark.
+
+| File | Covers |
+|---|---|
+| `tests/test_spectrum.py` | Gate 1 — Hs relation, spreading normalisation, the Jacobian, dispersion, moments, Cox–Munk |
+| `tests/test_surface.py` | Gate 2 — realness, variance, LOD invariant, Jacobian folding, crest speed, Tz |
+| `tests/test_reproducibility.py` | Gate 3 — determinism, statelessness, regression baseline, config contracts |
+
+### The regression baseline
+
+`tests/baseline/` holds a pinned tile and a pinned composite sample, generated at
+a fixed seed and `t`. They are the only thing that catches an accidental
+convention change during later refactoring — a flipped FFT sign, a lost factor of
+`N²`, a `flip_k` off-by-one. Those leave the variance, the spectrum *and* the
+slope statistics all correct, so nothing else would notice.
+
+Regenerate with `python tests/make_baseline.py`, but treat that as a deliberate
+act: **if a baseline test fails, assume the code changed, not that the baseline
+is stale.** Only regenerate after confirming the new behaviour is intended, and
+say so in the commit message.
+
+The baseline scene is defined in code inside `make_baseline.py` rather than
+loaded from `configs/`, so editing a shipped config cannot silently invalidate
+the regression record.
+
+### Two gate criteria are deliberately substituted
+
+Both are documented in full under *Gate deviations* in the generated report:
+
+1. **Gate 1's "Hs within 2%"** is unmeetable — JONSWAP's `alpha` and `f_p` fits
+   imply `m0 ~ X̃^1.10` while its energy growth law implies `m0 ~ X̃^1.00`, so the
+   two agree at exactly one fetch. The suite instead pins the *relation*
+   `hs_spectral / fetch_limited_hs = 0.78696 · X̃^0.05` across four decades of
+   fetch, which is strictly stronger: the measured exponent is 0.050007 against a
+   structural prediction of exactly 0.05.
+2. **Gate 2's "skewness in [0, 0.3]"** is unmeetable because this model is linear
+   in elevation. The Gerstner displacement relocates sample points horizontally
+   but never changes the set of elevation values, so it cannot create the
+   crest/trough asymmetry that skews a real sea. Measured area-weighted skewness
+   is −0.015 at choppiness 1.0 versus −0.011 with displacement off. The suite
+   asserts Gaussianity instead (`|skew| < 0.05`, `|excess kurtosis| < 0.1`) and
+   reports the displaced value without bounding it. Positive elevation skewness
+   requires second-order Stokes bound harmonics, which are not implemented.
