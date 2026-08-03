@@ -25,6 +25,14 @@ anisotropy — as physically derived numbers rather than art-directed knobs.
 **New here?** [docs/gallery.md](docs/gallery.md) explains the whole model in
 eight figures, with no code required.
 
+```bash
+python scripts/make_figures.py     # rebuild the gallery
+python scripts/make_overview.py    # one self-contained HTML page you can send on
+```
+
+Both compute every number live, so a figure that disagrees with the validation
+report means the code changed — not that the picture went stale.
+
 ## Install
 
 ```bash
@@ -102,7 +110,8 @@ tests/
   test_nearshore.py       PHASE 5: Gate 5 checks
   make_baseline.py        regenerates tests/baseline/ (a deliberate act)
 scripts/
-  make_figures.py generates docs/figures/ and docs/gallery.md
+  make_figures.py  generates docs/figures/ and docs/gallery.md
+  make_overview.py generates docs/overview.html, one self-contained shareable page
 configs/
   test_lake.yaml  the reference scene: 5 m/s wind, 1 km fetch
 docs/

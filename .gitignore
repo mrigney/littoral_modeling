@@ -17,6 +17,9 @@ venv/
 # Everything else dropped in that directory stays local.
 docs/figures/*
 !docs/figures/*.png
+# Self-contained shareable page: ~1.6 MB with every figure inlined as base64,
+# and the bytes change on every rebuild. Regenerate it, do not version it.
+docs/overview.html
 *.ply
 *.npy
 !tests/baseline/*.npy
