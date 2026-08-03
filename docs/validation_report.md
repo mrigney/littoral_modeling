@@ -4,12 +4,12 @@
 
 | | |
 |---|---|
-| generated | 2026-08-03 12:28:48 UTC |
-| git_sha | `db21a16a6c8a28d745bf9117d4ee4edf995d4758` |
+| generated | 2026-08-03 13:04:43 UTC |
+| git_sha | `cbad54e285b1042e0761048791b36daa43a007da (working tree dirty)` |
 | scene | `configs/test_lake.yaml` |
 | python | 3.14.5 (Windows AMD64) |
 | numpy / scipy | 2.5.1 / 1.18.0 |
-| checks recorded | 93 |
+| checks recorded | 95 |
 | exit status | PASS |
 
 Every number below was measured by the test suite against the implementation in this commit. Tolerances are the gate criteria from `littoral-water-implementation-cookbook.md`, except where a deviation is recorded in [Gate deviations](#gate-deviations).
@@ -172,6 +172,8 @@ Notes:
 | peak foam coverage | 0.266497 | -- | -- | -- | PASS |
 | cold vs sequential, worst per-cell relative error | 0.006144 | 0 | -- | 1.0e-02 | PASS |
 | spin-up steps for 0.5% residual at 30 fps | 688 | -- | -- | -- | PASS |
+| depth from the coarse vs refined grid, 5 m offshore | 3.0543e-04 m | 0 m | -- | 5.0e-02 | PASS |
+| shipped configs that load and build | 2 | -- | -- | -- | PASS |
 
 Notes:
 
@@ -203,6 +205,8 @@ Notes:
 - **peak foam coverage** -- Below the still-water equilibrium because advection continually sweeps foam out of the cells that seed it.
 - **cold vs sequential, worst per-cell relative error** -- Spin-up 92 steps = 23.0 s, initial-condition residual 0.0049. As a fraction of peak coverage the error is 0.121%. The cookbook's suggested 30 frames would leave 79% of the initial condition intact -- the window is set by the half life, not by a frame count.
 - **spin-up steps for 0.5% residual at 30 fps** -- = 22.9 s of simulated time. At the 0.25 s foam step the same window is 92 steps, which is why foam does not sub-step at the frame rate.
+- **depth from the coarse vs refined grid, 5 m offshore** -- Grids are 1 m and 0.25 m; they describe one beach, so a sample must not depend on which is used.
+- **shipped configs that load and build** -- coastal_bay: Hs 1.432 m, Tp 4.75 s; test_lake: Hs 0.085 m, Tp 1.05 s.
 
 ## Gate deviations
 

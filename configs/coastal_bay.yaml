@@ -1,0 +1,58 @@
+# Coastal bay -- a second scene, deliberately unlike the test lake.
+#
+# 12 m/s wind over 40 km of fetch on a curved shoreline: waves an order of
+# magnitude larger, a longer period, coarser sediment and a much wider surf
+# zone. It exists to prove nothing in the pipeline is wired to the test lake --
+# run both through `scripts/run_scene.py` and compare the reports.
+#
+# Measured by `scripts/run_scene.py`: Hs 1.43 m, Tp 4.75 s, lambda_p 35.3 m,
+# xi 0.61 -> plunging breakers, 7.1 m swash excursion. Against the test lake's
+# spilling breakers and 0.38 m swash, that is a different regime, not a rescale.
+
+scene:
+  domain: [4000.0, 4000.0]      # m
+  water_level: 0.0              # m, z_w (mean sea level here, not a lake surface)
+  epsg: 32616
+
+wind:
+  speed: 12.0                   # m/s at 10 m reference
+  direction: 75.0               # deg CCW from +X, direction blowing TOWARD
+  fetch: 40000.0                # m
+
+spectrum:
+  model: jonswap
+  gamma: 3.3
+  spreading: cos2s
+  seed: 4711
+
+surface:
+  # Tiles must resolve the peak: lambda_p ~ 27 m, so the coarse tile needs to be
+  # many peak wavelengths across, and the fine tile still needs its Nyquist above
+  # the capillary rolloff we care about. Sizes stay incommensurate.
+  tiles:
+    - {size: 1024.0, n: 1024, band: [0.0, 0.35]}
+    - {size: 593.0, n: 512, band: [0.35, 0.7]}
+    - {size: 367.0, n: 512, band: [0.7, 1.0]}
+  choppiness: 1.0
+
+bathymetry:
+  profile: embayment            # bays and headlands, so refraction has work to do
+  shoreline: 3000.0             # m, y coordinate of the waterline
+  grain_size: 0.5               # mm -- coarse sand, steeper equilibrium profile
+  max_depth: 25.0               # m
+  bank_slope: 0.10
+  dx: 4.0                       # m, field grid spacing
+  surf_dx: 1.0                  # m, refined spacing through the surf zone
+  amplitude: 220.0              # m, bay-to-headland excursion
+  wavelength: 1600.0            # m, alongshore period
+
+nearshore:
+  breaker_index: 0.78
+  foam_halflife: 6.0            # s -- bigger breakers, longer-lived foam
+  refraction: true
+  shoaling: true
+
+output:
+  fps: 30.0
+  mesh_dx: 0.5                  # m, water mesh post spacing
+  lod_rings: [{r: 400.0, dx: 0.5}, {r: 1200.0, dx: 2.0}, {r: 1e9, dx: 8.0}]

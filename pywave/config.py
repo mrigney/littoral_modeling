@@ -22,6 +22,7 @@ __all__ = [
     "SpectrumConfig",
     "TileConfig",
     "SurfaceConfig",
+    "BathymetryConfig",
     "NearshoreConfig",
     "OutputConfig",
     "LodRing",
@@ -134,6 +135,67 @@ class SurfaceConfig:
 
 
 @dataclass(frozen=True)
+class BathymetryConfig:
+    """The synthetic basin, standing in for the Phase 4 terrain export.
+
+    Present so a scene file fully determines the nearshore products.  When
+    Phase 4 lands, a ``source`` key pointing at exported fields will select real
+    bathymetry instead, and everything here becomes the fallback.
+    """
+
+    profile: str = "planar"
+    """``planar`` (straight shoreline) or ``embayment`` (cosine bays and headlands)."""
+    shoreline: float = 400.0
+    """Y coordinate of the waterline [m]; water lies below it, land above."""
+    dean_a: float | None = None
+    """Dean scale parameter [m^(1/3)].  ``None`` derives it from ``grain_size``."""
+    grain_size: float = 0.25
+    """Median sediment diameter D50 [mm].  Ignored when ``dean_a`` is given."""
+    max_depth: float = 5.0
+    bank_slope: float = 0.08
+    dx: float = 1.0
+    """Post spacing of the field grid [m]."""
+    surf_dx: float = 0.25
+    """Refined post spacing for surf-zone products [m].
+
+    The surf zone here is about a metre wide, so a 1 m grid cannot resolve it at
+    all -- this is the terracing problem cookbook section 4.4 warns about, and
+    the reason it recommends refining inside the nearshore band.
+    """
+    amplitude: float = 40.0
+    """Embayment only: half the bay-to-headland excursion [m]."""
+    wavelength: float = 400.0
+    """Embayment only: alongshore period [m]."""
+
+    def __post_init__(self) -> None:
+        if self.profile not in ("planar", "embayment"):
+            raise ValueError(
+                f"bathymetry.profile must be 'planar' or 'embayment', "
+                f"got {self.profile!r}")
+        if self.dx <= 0 or self.surf_dx <= 0:
+            raise ValueError("bathymetry.dx and surf_dx must be positive")
+        if self.surf_dx > self.dx:
+            raise ValueError(
+                f"bathymetry.surf_dx ({self.surf_dx}) must be finer than dx "
+                f"({self.dx}); it exists to resolve the surf zone")
+        if self.max_depth <= 0:
+            raise ValueError(f"bathymetry.max_depth must be positive, got {self.max_depth}")
+        if self.dean_a is not None and self.dean_a <= 0:
+            raise ValueError(f"bathymetry.dean_a must be positive, got {self.dean_a}")
+        if self.grain_size <= 0:
+            raise ValueError(f"bathymetry.grain_size must be positive, got {self.grain_size}")
+
+    @property
+    def a(self) -> float:
+        """The Dean scale parameter actually in force [m^(1/3)]."""
+        if self.dean_a is not None:
+            return self.dean_a
+        from .bathymetry import dean_A_for_grain_size
+
+        return dean_A_for_grain_size(self.grain_size)
+
+
+@dataclass(frozen=True)
 class NearshoreConfig:
     breaker_index: float = 0.78
     foam_halflife: float = 3.0
@@ -164,7 +226,13 @@ class Config:
     surface: SurfaceConfig
     nearshore: NearshoreConfig = field(default_factory=NearshoreConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
+    bathymetry: BathymetryConfig = field(default_factory=BathymetryConfig)
     source_path: Path | None = None
+
+    @property
+    def name(self) -> str:
+        """Scene name, from the config filename.  ``unnamed`` if built in code."""
+        return self.source_path.stem if self.source_path else "unnamed"
 
     # -- derived spectral quantities, so callers never re-derive them --------
 
@@ -221,6 +289,7 @@ def load_config(path: str | Path) -> Config:
     surf_raw = raw["surface"]
     near_raw = raw.get("nearshore", {})
     out_raw = raw.get("output", {})
+    bath_raw = raw.get("bathymetry", {})
 
     scene = SceneConfig(
         domain=(float(scene_raw["domain"][0]), float(scene_raw["domain"][1])),
@@ -256,4 +325,17 @@ def load_config(path: str | Path) -> Config:
             for r in out_raw.get("lod_rings", [])
         ),
     )
-    return Config(scene, wind, spectrum, surface, nearshore, output, source_path=path)
+    bathymetry = BathymetryConfig(
+        profile=str(bath_raw.get("profile", "planar")),
+        shoreline=float(bath_raw.get("shoreline", 400.0)),
+        dean_a=(None if bath_raw.get("dean_a") is None else float(bath_raw["dean_a"])),
+        grain_size=float(bath_raw.get("grain_size", 0.25)),
+        max_depth=float(bath_raw.get("max_depth", 5.0)),
+        bank_slope=float(bath_raw.get("bank_slope", 0.08)),
+        dx=float(bath_raw.get("dx", 1.0)),
+        surf_dx=float(bath_raw.get("surf_dx", 0.25)),
+        amplitude=float(bath_raw.get("amplitude", 40.0)),
+        wavelength=float(bath_raw.get("wavelength", 400.0)),
+    )
+    return Config(scene, wind, spectrum, surface, nearshore, output, bathymetry,
+                  source_path=path)

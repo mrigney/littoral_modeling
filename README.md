@@ -25,13 +25,43 @@ anisotropy — as physically derived numbers rather than art-directed knobs.
 **New here?** [docs/gallery.md](docs/gallery.md) explains the whole model in
 eight figures, with no code required.
 
+## Run a scene
+
+Write a scene file, run one command, look at what comes out:
+
 ```bash
-python scripts/make_figures.py     # rebuild the gallery
-python scripts/make_overview.py    # one self-contained HTML page you can send on
+cp configs/test_lake.yaml configs/my_scene.yaml     # edit wind, fetch, beach…
+python scripts/run_scene.py configs/my_scene.yaml
 ```
 
-Both compute every number live, so a figure that disagrees with the validation
-report means the code changed — not that the picture went stale.
+Everything lands in `runs/my_scene/`:
+
+| Output | What it is |
+|---|---|
+| `summary.md` | Scene report — sea state, tiles, LOD budget, surf zone. **Start here.** |
+| `overview.html` | One self-contained page. Open in a browser, or mail it to someone. |
+| `gallery.md` | The eight figures with captions; renders on GitHub. |
+| `figures/*.png` | The figures on their own, 150 dpi. |
+| `channels/*.npy` | Per-cell nearshore fields + `manifest.json` — what Phase 6 will consume. |
+| `summary.json` | Every number in `summary.md`, machine-readable. |
+
+Takes about 40 s for a small lake, a couple of minutes for a large coastal scene.
+Add `--quick` to skip the channel export and the HTML page.
+
+Two example scenes ship, and they are deliberately unlike each other —
+[`test_lake.yaml`](configs/test_lake.yaml) (5 m/s, 1 km fetch → 8.6 cm waves,
+spilling breakers, 0.4 m swash) and [`coastal_bay.yaml`](configs/coastal_bay.yaml)
+(12 m/s, 40 km fetch, embayed shore → 1.43 m waves, plunging breakers, 7 m
+swash). Every figure, number and channel is derived from the config, so a
+disagreement with the validation report means the code changed — not that the
+picture went stale.
+
+Individual pieces, if you want just one:
+
+```bash
+python scripts/make_figures.py  --config configs/my_scene.yaml --out /tmp/figs
+python scripts/make_overview.py --config configs/my_scene.yaml --out /tmp/page.html
+```
 
 ## Install
 
@@ -110,10 +140,12 @@ tests/
   test_nearshore.py       PHASE 5: Gate 5 checks
   make_baseline.py        regenerates tests/baseline/ (a deliberate act)
 scripts/
-  make_figures.py  generates docs/figures/ and docs/gallery.md
-  make_overview.py generates docs/overview.html, one self-contained shareable page
+  run_scene.py     config -> every artifact, in one directory
+  make_figures.py  the eight figures + a markdown gallery
+  make_overview.py one self-contained shareable HTML page
 configs/
-  test_lake.yaml  the reference scene: 5 m/s wind, 1 km fetch
+  test_lake.yaml    reference scene: 5 m/s wind, 1 km fetch, straight beach
+  coastal_bay.yaml  contrasting scene: 12 m/s, 40 km fetch, embayed shore
 docs/
   gallery.md            the model in eight figures
   users_guide.md

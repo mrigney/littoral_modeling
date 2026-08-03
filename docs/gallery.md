@@ -9,7 +9,7 @@ python scripts/make_figures.py            # rebuild all of it
 python scripts/make_figures.py --list     # what is available
 ```
 
-**Scene throughout:** `configs/test_lake.yaml` — 5 m/s wind over 1 km of fetch, giving Hs = 8.6 cm and a 1.05 s peak period. A small lake, deep water everywhere except the last few metres.
+**Scene throughout:** `test_lake` — 5 m/s wind over 1000 m of fetch, giving Hs = 8.6 cm and a 1.05 s peak period.
 
 ---
 

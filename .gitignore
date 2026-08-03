@@ -20,6 +20,8 @@ docs/figures/*
 # Self-contained shareable page: ~1.6 MB with every figure inlined as base64,
 # and the bytes change on every rebuild. Regenerate it, do not version it.
 docs/overview.html
+# Per-scene output from scripts/run_scene.py -- regenerate it, do not version it.
+runs/
 *.ply
 *.npy
 !tests/baseline/*.npy

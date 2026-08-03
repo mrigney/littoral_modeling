@@ -25,6 +25,7 @@ synthetic beach). Remaining phases are listed under [Roadmap](#12-roadmap).
 12. [Roadmap](#12-roadmap)
 13. [Validating a build](#13-validating-a-build)
 14. [The nearshore](#14-the-nearshore)
+15. [Running a scene end to end](#15-running-a-scene-end-to-end)
 
 > **In a hurry?** [gallery.md](gallery.md) explains the whole model in eight
 > figures.
@@ -124,6 +125,18 @@ print(f"normals shape {field.normals().shape}")
 
 `t` is seconds since scenario start. Ask for `t = 8000.0` directly — the surface
 is a pure function of time, with no accumulated state and no drift.
+
+### Or skip the API entirely
+
+```bash
+cp configs/test_lake.yaml configs/my_scene.yaml
+python scripts/run_scene.py configs/my_scene.yaml
+```
+
+That writes a scene report, the eight figures, a self-contained HTML page and the
+per-cell nearshore channels into `runs/my_scene/`. Start with `summary.md`.
+Everything is derived from the config, so changing the wind, the fetch or the
+beach changes every artifact. See [section 15](#15-running-a-scene-end-to-end).
 
 ---
 
@@ -273,7 +286,19 @@ surface:
     - {size: 23.0, n: 256, band: [0.7, 1.0]}
   choppiness: 1.0               # physical value; do not tune
 
-nearshore:                      # PHASE 5 — parsed and validated, not yet used
+bathymetry:                     # the synthetic basin (PHASE 4 stand-in)
+  profile: planar               # planar | embayment
+  shoreline: 400.0              # m, y of the waterline; water below, land above
+  dean_a: 0.100                 # m^(1/3); omit to derive from grain_size
+  grain_size: 0.25              # mm, D50 -- ignored when dean_a is given
+  max_depth: 5.0                # m
+  bank_slope: 0.08
+  dx: 1.0                       # m, field grid spacing
+  surf_dx: 0.25                 # m, refined spacing through the surf zone
+  amplitude: 40.0               # m, embayment only
+  wavelength: 400.0             # m, embayment only
+
+nearshore:                      # PHASE 5
   breaker_index: 0.78
   foam_halflife: 3.0            # s
   refraction: true
@@ -310,6 +335,18 @@ output:                         # PHASE 6 — parsed and validated, not yet used
 - `band` — `[lo, hi]` as *fractions*, not wavenumbers. Bands must be contiguous,
   disjoint, and together span exactly `[0, 1]`. A gap silently loses variance, so
   it is rejected at load.
+
+**`bathymetry`** — all optional; describes the synthetic basin Phase 5 runs
+against, and is replaced by the Houdini export when Phase 4 lands.
+- `profile` — `planar` (straight shoreline) or `embayment` (cosine bays and
+  headlands). Anything else raises.
+- `shoreline` — Y coordinate of the waterline. Water lies *below* it in Y and
+  land above, so a wind with a +Y component drives waves onto the beach.
+- `dean_a` / `grain_size` — the Dean scale parameter directly, or the median
+  grain diameter to derive it from. `dean_a` wins if both are given.
+- `dx` / `surf_dx` — field grid spacing, and the refined spacing used for
+  surf-zone products. `surf_dx` must be the finer of the two; it exists because
+  the surf zone can be a metre wide, which a 1 m grid cannot resolve at all.
 
 **`surface.choppiness`** — the horizontal displacement scale. `1.0` is the
 physical value. Above ~1.3 the displacement map can fold through itself, inverting
@@ -968,3 +1005,98 @@ wave heights.
 What is *not* approximated is the coefficient physics: `shoaling_coefficient` and
 `refraction_angle` solve the full dispersion relation and Snell's law, and the
 tests check them against closed-form answers at every cell.
+
+---
+
+## 15. Running a scene end to end
+
+```bash
+python scripts/run_scene.py                          # the shipped test lake
+python scripts/run_scene.py configs/my_scene.yaml    # your own
+python scripts/run_scene.py configs/my_scene.yaml --out /tmp/run --quick
+```
+
+One command takes a scene file and produces every artifact the model currently
+knows how to make. Nothing is wired to a particular scene: change the wind, the
+fetch or the beach and the figures, the numbers and the exported channels all
+follow.
+
+### What you get
+
+```
+runs/<scene>/
+  summary.md          scene report — start here
+  summary.json        the same numbers, machine-readable
+  gallery.md          the eight figures with captions
+  overview.html       one self-contained page; mail it to someone
+  figures/*.png       the figures on their own, 150 dpi
+  channels/
+    manifest.json     grid georeferencing, units, ranges
+    depth.npy         still-water depth, positive in water
+    sdf.npy           signed distance to the waterline, positive inland
+    shore_normal_x.npy, shore_normal_y.npy
+    hs_local.npy      local significant height after the transform
+    shoaling_gain.npy Hs_local / Hs_deep
+    breaking.npy      1 where the depth-limited height is exceeded
+    wetness.npy       fraction of a wave period submerged
+    foam.npy          surf-zone foam coverage
+    elevation.npy     wave elevation about z_w at t = 0
+    slope_x.npy, slope_y.npy
+```
+
+The channels are on the **refined** grid (`bathymetry.surf_dx`), because the surf
+zone can be a metre wide and the coarse grid cannot resolve it. They are what
+Phase 6 will pack into per-vertex mesh attributes.
+
+Two notes on how they are computed, both recorded in `manifest.json` so nobody
+has to guess:
+
+- Channels are evaluated with the wind blowing **straight onshore**, which makes
+  the refraction coefficient exactly 1 and isolates shoaling. The deep-water
+  surface in the figures uses the config's own wind direction.
+- Everything is at `t = 0`, except foam, which is spun up for its full
+  reproducibility window first.
+
+### Writing a scene file
+
+Copy [`configs/test_lake.yaml`](../configs/test_lake.yaml) — every key is
+commented — and see [section 6](#6-the-config-file) for the full reference. The
+config is validated on load, so a mistake fails immediately with a message
+naming the offending key rather than surfacing three modules later.
+
+Two things worth getting right, because they are the ones that bite:
+
+**Tiles must resolve the peak.** The composite is only as good as its grids. A
+tile's Nyquist is `π·n/size`, and at least one tile needs a Nyquist comfortably
+above `k_p = 2π/λ_p`. Doubling the wind roughly quadruples `λ_p`, so a tile set
+tuned for chop will not do for swell. `run_scene.py` asserts this and the test
+suite checks every shipped config.
+
+**Keep tile sizes incommensurate.** 64/37/23 rather than 64/32/16. Sizes in
+simple ratios re-align their lattices and the periodicity the multi-tile
+construction exists to hide comes straight back.
+
+### The two shipped scenes
+
+They are deliberately different regimes, not a rescale of one another:
+
+| | `test_lake` | `coastal_bay` |
+|---|---|---|
+| Wind / fetch | 5 m/s, 1 km | 12 m/s, 40 km |
+| Hs | 0.086 m | 1.43 m |
+| Tp | 1.05 s | 4.75 s |
+| λp | 1.71 m | 35.3 m |
+| Shoreline | straight | embayed, ±220 m |
+| Iribarren ξ | 0.33 — **spilling** | 0.61 — **plunging** |
+| Surf zone | 1.0 m | 48.6 m |
+| Swash excursion | 0.38 m | 7.1 m |
+
+Running both and diffing the two `summary.md` files is the fastest way to see
+which quantities are scene-dependent and which are structural.
+
+### Runtime
+
+About 40 s for the test lake, roughly two minutes for the coastal bay — the cost
+is dominated by tile construction, which scales with the FFT grids, and by the
+foam spin-up. `--quick` skips the channel export and the HTML page and roughly
+halves it.

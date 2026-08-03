@@ -146,6 +146,47 @@ class Bathymetry:
     # -- construction --------------------------------------------------------
 
     @classmethod
+    def from_config(cls, cfg, fine: bool = False) -> "Bathymetry":
+        """Build the basin a scene file describes.
+
+        ``fine=True`` uses ``bathymetry.surf_dx`` instead of ``dx``, and crops to
+        a band around the waterline rather than the whole domain -- a refined
+        grid over the full scene would be enormous and is pointless offshore,
+        where nothing varies on that scale.
+
+        Cropping keeps the world coordinates of the coarse grid, so a point
+        sampled from either grid lands in the same place.
+        """
+        b = cfg.bathymetry
+        width, height = cfg.scene.domain
+
+        if fine:
+            dx = b.surf_dx
+            # Generous enough to hold the surf zone, the swash and the offshore
+            # run-up to a few peak wavelengths -- plus, on a curved shoreline,
+            # the full bay-to-headland excursion. Sizing the window off the
+            # nominal shoreline alone crops the headlands clean off.
+            margin = max(20.0 * cfg.lambda_p, 40.0)
+            wander = b.amplitude if b.profile == "embayment" else 0.0
+            y0 = max(0.0, b.shoreline - margin - wander)
+            y1 = min(height, b.shoreline + 0.25 * margin + wander)
+        else:
+            dx = b.dx
+            y0, y1 = 0.0, height
+
+        nx = max(int(round(width / dx)), 8)
+        ny = max(int(round((y1 - y0) / dx)), 8)
+
+        common = dict(nx=nx, ny=ny, dx=dx, shoreline_y=b.shoreline, dean_a=b.a,
+                      max_depth=b.max_depth, bank_slope=b.bank_slope,
+                      water_level=cfg.scene.water_level, origin=(0.0, y0),
+                      epsg=cfg.scene.epsg)
+        if b.profile == "embayment":
+            return cls.dean_embayment(amplitude=b.amplitude, wavelength=b.wavelength,
+                                      **common)
+        return cls.dean_beach(**common)
+
+    @classmethod
     def dean_beach(
         cls,
         nx: int = 512,

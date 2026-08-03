@@ -63,6 +63,112 @@ def figure(name: str, caption: str):
     return deco
 
 
+class Scene:
+    """Everything a figure might need, built once and shared.
+
+    Tile sets and bathymetry grids are the expensive part; eight figures each
+    rebuilding their own turned a 20-second job into a two-minute one. Held
+    lazily so `--only` still pays for just what it uses.
+    """
+
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self._cache: dict = {}
+
+    def _memo(self, key, make):
+        if key not in self._cache:
+            self._cache[key] = make()
+        return self._cache[key]
+
+    @property
+    def tileset(self):
+        return self._memo("ts", lambda: tiling.TileSet.build(self.cfg))
+
+    @property
+    def fields(self):
+        return self._memo("fields", lambda: self.tileset.evaluate_grids(0.0))
+
+    @property
+    def bathy(self):
+        return self._memo("bathy", lambda: Bathymetry.from_config(self.cfg))
+
+    @property
+    def fine_bathy(self):
+        return self._memo("fine", lambda: Bathymetry.from_config(self.cfg, fine=True))
+
+    @property
+    def onshore_cfg(self):
+        """The scene with the wind blowing straight onshore (+Y).
+
+        Normal incidence makes the refraction coefficient exactly 1, isolating
+        shoaling. At oblique incidence the two very nearly cancel on a Dean
+        beach, so a figure that did not control for this would suggest shoaling
+        does nothing.
+        """
+        from dataclasses import replace
+
+        return self._memo("oncfg", lambda: replace(
+            self.cfg, wind=replace(self.cfg.wind, direction_rad=np.radians(90.0))))
+
+    @property
+    def onshore_tileset(self):
+        return self._memo("onts", lambda: tiling.TileSet.build(self.onshore_cfg))
+
+    # -- scene-derived scales, so figures adapt to any config ----------------
+
+    @property
+    def view_extent(self) -> float:
+        """Side of the surface close-up [m]: enough peaks to read, not so many
+        that the finest band aliases into noise."""
+        return float(np.clip(24.0 * self.cfg.lambda_p, 8.0, 400.0))
+
+    @property
+    def tile_ladder(self):
+        """Grid sizes for the Hs-by-resolution bar chart, scaled to the sea state."""
+        base = 2.0 ** np.round(np.log2(20.0 * self.cfg.lambda_p))
+        return [(float(base * f), n) for f, n in ((0.5, 256), (1, 512),
+                                                  (2, 1024), (4, 1024))]
+
+    @property
+    def swash_band(self) -> float:
+        """Horizontal swash excursion [m], from Hunt runup on this beach."""
+        slope = self.bathy.beach_slope()
+        l0 = float(nearshore.deep_water_wavelength(1.0 / self.cfg.f_p))
+        hs = self.tileset.hs()
+        xi = nearshore.iribarren_number(slope, hs, l0)
+        return float(nearshore.swash_width(nearshore.hunt_runup(xi, hs), slope))
+
+    def foam_field(self, t: float = 30.0):
+        """``(foam, breaking)`` on the refined grid.
+
+        Cached because the spin-up integration is the most expensive thing in
+        the figure set, and both the surf-zone figure and the run report want it.
+        """
+        def make():
+            b = self.fine_bathy
+            omega = 2.0 * np.pi * self.cfg.f_p
+            d = np.maximum(b.depth, 1e-3)
+            cg = spectrum.group_velocity(spectrum.dispersion_k(omega, d), d)
+            ks = nearshore.shoaling_coefficient(omega, np.maximum(b.depth, 1e-9))
+            hs = np.where(b.depth > 0.0, self.onshore_tileset.hs() * ks, 0.0)
+            brk = nearshore.breaking_mask(hs, b.depth,
+                                          self.cfg.nearshore.breaker_index)
+            model = foam_mod.FoamModel(
+                bathy=b, half_life=self.cfg.nearshore.foam_halflife)
+            return model.evaluate(lambda tt: brk, cg, t=t), brk
+
+        return self._memo("foam", make)
+
+    def surf_transect(self, n: int = 1200):
+        """``(x, y)`` running from just inside the waterline to well offshore."""
+        b = self.fine_bathy
+        x0 = 0.5 * (b.meta.extent[0] + b.meta.extent[1])
+        reach = max(30.0 * self.swash_band, 12.0)
+        y_shore = self.cfg.bathymetry.shoreline
+        y = np.linspace(y_shore - 0.05, max(y_shore - reach, b.meta.extent[2]), n)
+        return np.full(n, x0), y
+
+
 def _style(ax, title=None, xlabel=None, ylabel=None, legend=False):
     ax.set_facecolor("white")
     for side in ("top", "right"):
@@ -115,7 +221,8 @@ def _shade(h, slope_x, slope_y, az_deg=315.0, alt_deg=38.0, cmap=WATER):
 @figure("spectrum", "The JONSWAP spectrum and its directional spreading — the "
                     "single source of truth from which every other quantity in "
                     "the package is derived.")
-def fig_spectrum(cfg):
+def fig_spectrum(scene):
+    cfg = scene.cfg
     u10, fetch, gamma = cfg.wind.speed, cfg.wind.fetch, cfg.spectrum.gamma
     _, f_p, _ = spectrum.jonswap_params(u10, fetch)
 
@@ -175,7 +282,8 @@ def fig_spectrum(cfg):
 @figure("lod", "The LOD invariant. Slope variance lost when the mesh coarsens is "
                "not lost — it is handed to the BSDF as sub-facet roughness, so "
                "the total is conserved across every level of detail.")
-def fig_lod(cfg):
+def fig_lod(scene):
+    cfg = scene.cfg
     u10, fetch, gamma = cfg.wind.speed, cfg.wind.fetch, cfg.spectrum.gamma
     total = moments.mss_above(0.0, u10, fetch, gamma=gamma)
 
@@ -224,14 +332,13 @@ def fig_lod(cfg):
                    "incommensurate size, each carrying a disjoint band of the "
                    "spectrum and rotated by a multiple of the golden angle, so "
                    "no repeat pattern survives in the sum.")
-def fig_surface(cfg):
-    ts = tiling.TileSet.build(cfg)
-    fields = ts.evaluate_grids(0.0)
+def fig_surface(scene):
+    cfg = scene.cfg
+    ts, fields = scene.tileset, scene.fields
 
-    # 40 m across at 900 px = 4.4 cm/px. The finest tile carries k up to 35
-    # rad/m (lambda = 18 cm), so this resolves the top of the band rather than
-    # aliasing it into noise.
-    n, extent = 900, 40.0
+    # Scaled to the sea state: ~24 peak wavelengths across at 900 px, which
+    # resolves the top of the finest band rather than aliasing it into noise.
+    n, extent = 900, scene.view_extent
     ax_ = np.linspace(0.0, extent, n)
     X, Y = np.meshgrid(ax_, ax_)
 
@@ -280,12 +387,13 @@ def fig_surface(cfg):
 @figure("statistics", "The realised surface reproduces the spectrum it was built "
                       "from: Gaussian elevations, the right variance, and crests "
                       "travelling at the right speed.")
-def fig_statistics(cfg):
-    ts = tiling.TileSet.build(cfg)
-    fields = ts.evaluate_grids(0.0)
+def fig_statistics(scene):
+    cfg = scene.cfg
+    ts, fields = scene.tileset, scene.fields
     rng = np.random.default_rng(3)
-    X = rng.uniform(0, 500, 300_000)
-    Y = rng.uniform(0, 500, 300_000)
+    span = 8.0 * scene.view_extent
+    X = rng.uniform(0, span, 300_000)
+    Y = rng.uniform(0, span, 300_000)
     comp = ts.sample(X, Y, 0.0, fields=fields)
 
     fig, axes = plt.subplots(1, 3, figsize=(11.5, 3.6))
@@ -303,7 +411,7 @@ def fig_statistics(cfg):
 
     ax = axes[1]
     u10, fetch, gamma = cfg.wind.speed, cfg.wind.fetch, cfg.spectrum.gamma
-    sizes = [(32.0, 256), (64.0, 512), (128.0, 1024), (256.0, 1024)]
+    sizes = scene.tile_ladder
     realised, theory, labels = [], [], []
     for L, n in sizes:
         tile = surface.WaveTile.build(L, n, u10, fetch, cfg.wind.direction_rad, seed=20260801)
@@ -322,7 +430,7 @@ def fig_statistics(cfg):
     ax.set_ylim(0, spectrum.hs_spectral(u10, fetch, gamma) * 1.25)
 
     ax = axes[2]
-    L, n, mode = 64.0, 256, 4
+    L, n, mode = 4.0 * cfg.lambda_p * 8.0, 256, 4
     kx, ky, k, _ = surface.grid_wavenumbers(L, n)
     h0 = np.zeros((n, n), complex); h0[0, mode] = 1.0
     omega = spectrum.dispersion_omega(k)
@@ -354,19 +462,24 @@ def fig_statistics(cfg):
                       "against. It satisfies the same field contract Houdini "
                       "will export in Phase 4, so swapping in real terrain is a "
                       "loader change rather than a physics change.")
-def fig_bathymetry(cfg):
-    planar = Bathymetry.dean_beach()
-    bay = Bathymetry.dean_embayment()
+def fig_bathymetry(scene):
+    cfg = scene.cfg
+    planar = scene.bathy
+    bay = Bathymetry.dean_embayment(
+        nx=256, ny=256, dx=max(cfg.bathymetry.dx, 1.0),
+        shoreline_y=0.75 * 256 * max(cfg.bathymetry.dx, 1.0),
+        dean_a=cfg.bathymetry.a, max_depth=cfg.bathymetry.max_depth)
 
     fig, axes = plt.subplots(1, 3, figsize=(12, 3.9))
 
     ax = axes[0]
     y = np.linspace(0.0, 300.0, 600)
+    dmax = cfg.bathymetry.max_depth
     for a, lab, col in ((0.079, "fine sand  A=0.079", "#9dc3d4"),
-                        (0.100, "medium sand  A=0.100", ACCENT),
+                        (cfg.bathymetry.a, f"this scene  A={cfg.bathymetry.a:.3f}", ACCENT),
                         (0.125, "coarse sand  A=0.125", ACCENT3)):
-        ax.plot(y, -np.minimum(a * y ** (2 / 3), 5.0), color=col, lw=1.8, label=lab)
-    ax.plot(y, -np.minimum(0.0167 * y, 5.0), color=ACCENT2, ls="--", lw=1.3,
+        ax.plot(y, -np.minimum(a * y ** (2 / 3), dmax), color=col, lw=1.8, label=lab)
+    ax.plot(y, -np.minimum(dmax / 300.0 * y, dmax), color=ACCENT2, ls="--", lw=1.3,
             label="linear ramp (wrong)")
     ax.axhline(0, color=MUTED, lw=1.0)
     _style(ax, "Dean equilibrium profile  h = A·y$^{2/3}$", "distance offshore [m]",
@@ -394,10 +507,13 @@ def fig_bathymetry(cfg):
 
     ax = axes[2]
     xa, ya = planar.meta.axes()
-    ax.plot(planar.sdf[:, 256], ya, color=ACCENT, lw=1.8, label="sdf (+ inland)")
-    ax.plot(planar.depth[:, 256], ya, color=ACCENT3, lw=1.8, label="depth (+ in water)")
-    ax.axhline(400.0, color=INK, lw=1.0, ls=":")
-    ax.text(-90, 404, "waterline", fontsize=7.5, color=INK)
+    col = planar.meta.shape[1] // 2
+    shore = cfg.bathymetry.shoreline
+    ax.plot(planar.sdf[:, col], ya, color=ACCENT, lw=1.8, label="sdf (+ inland)")
+    ax.plot(planar.depth[:, col], ya, color=ACCENT3, lw=1.8, label="depth (+ in water)")
+    ax.axhline(shore, color=INK, lw=1.0, ls=":")
+    ax.text(planar.sdf.min() * 0.9, shore + 0.02 * (ya[-1] - ya[0]),
+            "waterline", fontsize=7.5, color=INK)
     ax.axvline(0, color=MUTED, lw=0.8)
     _style(ax, "Sign convention: sdf = −sign(depth)", "field value [m]", "y [m]",
            legend=True)
@@ -412,14 +528,15 @@ def fig_bathymetry(cfg):
 @figure("shoaling", "Shoaling and refraction coefficients, both solved against "
                     "the full dispersion relation and both checked against "
                     "closed-form answers — Green's law and Snell's law.")
-def fig_shoaling(cfg):
+def fig_shoaling(scene):
+    cfg = scene.cfg
     omega = 2 * np.pi * cfg.f_p
-    beach = Bathymetry.dean_beach()
+    beach = scene.bathy
 
     fig, axes = plt.subplots(1, 3, figsize=(12, 3.7))
 
     ax = axes[0]
-    d = np.geomspace(0.002, 30.0, 3000)
+    d = np.geomspace(0.002, max(6.0 * cfg.lambda_p, 20.0), 3000)
     ks = nearshore.shoaling_coefficient(omega, d)
     ax.semilogx(d, ks, color=ACCENT, lw=2.0, label="$K_s$ (full dispersion)")
     green = ks[0] * (d / d[0]) ** -0.25
@@ -432,8 +549,10 @@ def fig_shoaling(cfg):
     _style(ax, "Shoaling coefficient", "still-water depth [m]", "$K_s$ [-]", legend=True)
 
     ax = axes[1]
-    x = np.full(400, 250.0)
-    y = np.linspace(399.6, 250.0, 400)
+    shore = cfg.bathymetry.shoreline
+    x = np.full(400, 0.5 * (beach.meta.extent[0] + beach.meta.extent[1]))
+    y = np.linspace(shore - 0.4, max(shore - 40.0 * cfg.lambda_p,
+                                     beach.meta.extent[2]), 400)
     depth, _, normal = beach.sample(x, y)
     for wind_deg, col in ((10.0, "#9dc3d4"), (45.0, ACCENT), (135.0, ACCENT3),
                           (170.0, ACCENT2)):
@@ -467,17 +586,15 @@ def fig_shoaling(cfg):
                      "the depth-limited breaking criterion, foam is seeded where "
                      "waves break and swept shoreward, and the wetness channel "
                      "carries the sub-pixel swash as a duty cycle.")
-def fig_nearshore(cfg):
-    from dataclasses import replace
+def fig_nearshore(scene):
+    cfg = scene.cfg
+    cfg_on = scene.onshore_cfg
+    ts = scene.onshore_tileset
+    beach = scene.fine_bathy
 
-    cfg_on = replace(cfg, wind=replace(cfg.wind, direction_rad=np.radians(90.0)))
-    ts = tiling.TileSet.build(cfg_on)
-    beach = Bathymetry.dean_beach(nx=256, ny=512, dx=0.25, shoreline_y=100.0)
-
-    x = np.full(1200, 32.0)
-    y = np.linspace(99.95, 88.0, 1200)
+    x, y = scene.surf_transect()
     nf = nearshore.transform(ts, beach, cfg_on, x, y, 0.0)
-    offshore = 100.0 - y
+    offshore = cfg.bathymetry.shoreline - y
 
     fig, axes = plt.subplots(2, 2, figsize=(11.5, 6.4))
 
@@ -485,9 +602,9 @@ def fig_nearshore(cfg):
     ax.fill_between(offshore, -nf.depth, 0, color="#bcd9e6", alpha=0.8)
     ax.plot(offshore, -nf.depth, color="#8a6f4a", lw=2.0)
     ax.axhline(0, color=ACCENT, lw=1.2)
-    ax.set_ylim(-1.2, 0.3)
-    _style(ax, "Bed profile (Dean, A = 0.1)", "distance offshore [m]",
-           "elevation about $z_w$ [m]")
+    ax.set_ylim(-1.25 * nf.depth.max(), 0.25 * nf.depth.max())
+    _style(ax, f"Bed profile (Dean, A = {cfg.bathymetry.a:.3f})",
+           "distance offshore [m]", "elevation about $z_w$ [m]")
 
     ax = axes[0, 1]
     ax.plot(offshore, nf.hs_local, color=ACCENT, lw=2.0, label="$H_s$ local")
@@ -507,35 +624,39 @@ def fig_nearshore(cfg):
            "distance offshore [m]", "$H_s$ [m]", legend=True)
 
     ax = axes[1, 0]
-    band = 0.381
-    s = np.linspace(-0.15, 0.55, 500)
+    band = scene.swash_band
+    s = np.linspace(-0.4 * band, 1.45 * band, 500)
     ax.plot(s, nearshore.wetness_fraction(s, band), color=ACCENT, lw=2.0,
             label="duty cycle (thermal)")
     for t, col in ((0.0, "#c7d7df"), (0.25 / cfg.f_p, "#9dc3d4")):
         ax.plot(s, nearshore.wetness(s, band, t, 1.0 / cfg.f_p), color=col, lw=1.2,
                 label=f"instantaneous, t = {t:.2f} s")
     ax.axvline(0, color=INK, lw=1.0, ls=":")
-    ax.text(0.005, 1.03, "waterline", fontsize=7.5, color=INK)
+    ax.text(band * 0.02, 1.03, "waterline", fontsize=7.5, color=INK)
     ax.axvline(band, color=ACCENT2, lw=1.0, ls=":")
-    ax.text(band + 0.01, 0.85, f"swash limit\nR/tanβ = {band:.2f} m",
+    ax.text(band * 1.03, 0.85, f"swash limit\nR/tanβ = {band:.2f} m",
             fontsize=7.5, color=ACCENT2)
     _style(ax, "Wetness — the sub-pixel swash channel",
            "distance inland (sdf) [m]", "wet fraction [-]", legend=True)
 
     ax = axes[1, 1]
-    omega = 2 * np.pi * cfg.f_p
-    d = np.maximum(beach.depth, 1e-3)
-    cg = spectrum.group_velocity(spectrum.dispersion_k(omega, d), d)
-    ks = nearshore.shoaling_coefficient(omega, np.maximum(beach.depth, 1e-9))
-    brk2 = nearshore.breaking_mask(np.where(beach.depth > 0, ts.hs() * ks, 0.0),
-                                   beach.depth, 0.78)
-    model = foam_mod.FoamModel(bathy=beach, half_life=cfg.nearshore.foam_halflife)
-    f = model.evaluate(lambda tt: brk2, cg, t=30.0)
+    f, brk2 = scene.foam_field()
     xa, ya = beach.meta.axes()
-    sl = slice(386, 410)                      # +/- 3 m about the waterline
+    shore = cfg.bathymetry.shoreline
+    # Crop to where foam actually is, not to a band around the nominal
+    # shoreline: on an embayment the waterline wanders by its full amplitude,
+    # and a fixed y-window slices across the bays instead of following them.
+    rows = np.flatnonzero(f.max(axis=1) > 0.01 * max(f.max(), 1e-12))
+    if rows.size:
+        pad = max(int(round(0.5 * max(band, 1.0) / beach.meta.dx)), 2)
+        sl = slice(max(int(rows[0]) - pad, 0), min(int(rows[-1]) + pad + 1, len(ya)))
+    else:
+        keep = np.abs(ya - shore) < max(6.0 * band, 3.0)
+        sl = slice(int(np.argmax(keep)), int(len(ya) - np.argmax(keep[::-1])))
     m = ax.pcolormesh(xa, ya[sl], f[sl], cmap="Blues", shading="auto", vmin=0)
     ax.contour(xa, ya[sl], beach.sdf[sl], levels=[0.0], colors=[ACCENT2], linewidths=1.2)
-    ax.text(1.0, 100.35, "waterline", fontsize=7.5, color=ACCENT2)
+    ax.text(xa[len(xa) // 40], ya[sl][int(0.85 * (sl.stop - sl.start))],
+            "waterline", fontsize=7.5, color=ACCENT2)
     ax.set_aspect("auto")
     cb = fig.colorbar(m, ax=ax, fraction=0.046, pad=0.03)
     cb.set_label("foam coverage [-]", color=INK, fontsize=8)
@@ -552,11 +673,22 @@ def fig_nearshore(cfg):
                           "actually acts. Two very different wind directions "
                           "produce nearly the same near-shore wave heading, "
                           "because each ray turns toward its own local contour.")
-def fig_refraction_map(cfg):
+def fig_refraction_map(scene):
+    cfg = scene.cfg
     # A finer, shallower basin: refraction is confined to d < ~1 m, which on the
     # 5 m-deep default beach is the last 30 m and invisible at domain scale.
-    bay = Bathymetry.dean_embayment(nx=384, ny=384, dx=0.5, shoreline_y=150.0,
-                                    amplitude=25.0, wavelength=140.0, max_depth=2.0)
+    # A shallow, finely sampled basin: refraction lives in d < ~1 m, which on a
+    # 5 m-deep beach is the last few tens of metres and invisible at domain scale.
+    span = max(60.0 * cfg.lambda_p, 80.0)
+    # Cap the basin at a depth where refraction is still active for *these*
+    # waves: it sets in around kd ~ 1, i.e. a depth of order lambda_p/2. Fixing
+    # it at a constant would show nothing for long-period swell and nothing but
+    # the deep limit for short chop.
+    bay = Bathymetry.dean_embayment(
+        nx=384, ny=384, dx=span / 384.0, shoreline_y=0.78 * span,
+        amplitude=0.13 * span, wavelength=0.73 * span,
+        dean_a=cfg.bathymetry.a,
+        max_depth=min(max(0.6 * cfg.lambda_p, 1.0), cfg.bathymetry.max_depth))
     omega = 2 * np.pi * cfg.f_p
     xa, ya = bay.meta.axes()
     water = bay.depth > 0
@@ -574,21 +706,25 @@ def fig_refraction_map(cfg):
         m = ax.pcolormesh(xa, ya, np.where(water, bay.depth, np.nan),
                           cmap=WATER.reversed(), shading="auto", alpha=0.9)
         ax.contour(xa, ya, bay.sdf, levels=[0.0], colors=[INK], linewidths=1.4)
-        ax.contour(xa, ya, bay.depth, levels=[0.2, 0.5], colors=[MUTED],
-                   linewidths=0.7, linestyles=":")
+        ax.contour(xa, ya, bay.depth,
+                   levels=[0.12 * bay.depth.max(), 0.3 * bay.depth.max()],
+                   colors=[MUTED], linewidths=0.7, linestyles=":")
 
         step = 11
-        shallow = water & (bay.depth < 1.2)
+        shallow = water & (bay.depth < 0.7 * bay.depth.max())
         u = np.where(shallow, np.cos(theta), np.nan)[::step, ::step]
         v = np.where(shallow, np.sin(theta), np.nan)[::step, ::step]
         ax.quiver(xa[::step], ya[::step], u, v, color=ACCENT2, scale=26, width=0.004)
 
-        near = water & (bay.depth < 0.15)
+        # The shallowest few percent of wet cells, rather than a fixed depth:
+        # on a coarse grid a fixed threshold can fall between cells and select
+        # nothing, which silently turns the reported angle into a NaN.
+        near = water & (bay.depth <= np.percentile(bay.depth[water], 3.0))
         residuals.append(float(np.degrees(np.abs(alpha[near]).mean())))
         headings.append(theta[near])
 
         ax.set_aspect("equal")
-        ax.set_ylim(95, 180)
+        ax.set_ylim(0.5 * span, 0.95 * span)
         _style(ax, f"wind toward {wind_deg:g}°", "x [m]", "y [m]")
         ax.text(0.985, 0.06, f"residual incidence at the break line: "
                              f"{residuals[-1]:.0f}°",
@@ -612,15 +748,16 @@ def fig_refraction_map(cfg):
 # ---------------------------------------------------------------------------
 
 
-def build(names, dpi=150):
-    cfg = load_config(CONFIG)
-    FIG_DIR.mkdir(parents=True, exist_ok=True)
+def build(names, scene, out_dir=None, dpi=150):
+    """Render `names` for `scene` into `out_dir`. Returns (name, caption, path)."""
+    out_dir = Path(out_dir or FIG_DIR)
+    out_dir.mkdir(parents=True, exist_ok=True)
     written = []
     for name in names:
         fn, caption = _REGISTRY[name]
         print(f"  {name} ...", end="", flush=True)
-        fig = fn(cfg)
-        path = FIG_DIR / f"{name}.png"
+        fig = fn(scene)
+        path = out_dir / f"{name}.png"
         fig.savefig(path, dpi=dpi, bbox_inches="tight", facecolor="white")
         plt.close(fig)
         written.append((name, caption, path))
@@ -640,8 +777,8 @@ TITLES = {
 }
 
 
-def write_gallery(written):
-    """Emit docs/gallery.md so the figures render on GitHub with their captions."""
+def write_gallery(written, cfg, path=None, rel="figures"):
+    """Emit a markdown gallery so the figures render on GitHub with captions."""
     lines = [
         "# pywave — what the model does, in eight figures",
         "",
@@ -657,16 +794,19 @@ def write_gallery(written):
         "python scripts/make_figures.py --list     # what is available",
         "```",
         "",
-        "**Scene throughout:** `configs/test_lake.yaml` — 5 m/s wind over 1 km of "
-        "fetch, giving Hs = 8.6 cm and a 1.05 s peak period. A small lake, deep "
-        "water everywhere except the last few metres.",
+        f"**Scene throughout:** `{cfg.name}` — {cfg.wind.speed:g} m/s wind over "
+        f"{cfg.wind.fetch:g} m of fetch, giving Hs = "
+        f"{100 * spectrum.hs_spectral(cfg.wind.speed, cfg.wind.fetch, cfg.spectrum.gamma):.1f}"
+        f" cm and a {1 / cfg.f_p:.2f} s peak period.",
         "",
         "---",
         "",
     ]
-    for name, caption, path in written:
+    # NOT `path` -- that is the output parameter, and shadowing it here silently
+    # redirected the gallery to the last figure's PNG path.
+    for name, caption, fig_path in written:
         lines += [f"## {TITLES.get(name, name)}", "",
-                  f"![{name}](figures/{path.name})", "", caption, "", "---", ""]
+                  f"![{name}]({rel}/{fig_path.name})", "", caption, "", "---", ""]
     lines += [
         "## Where this sits",
         "",
@@ -684,13 +824,17 @@ def write_gallery(written):
         "with the reference it was judged against.",
         "",
     ]
-    (ROOT / "docs" / "gallery.md").write_text("\n".join(lines), encoding="utf-8")
-    print(f"  gallery -> {ROOT / 'docs' / 'gallery.md'}")
+    path = Path(path or ROOT / "docs" / "gallery.md")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines), encoding="utf-8")
+    print(f"  gallery -> {path}")
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--config", default=str(CONFIG), help="scene YAML to render")
+    p.add_argument("--out", default=None, help="output directory for the PNGs")
     p.add_argument("--only", nargs="*", help="figure names to build")
     p.add_argument("--list", action="store_true", help="list available figures")
     p.add_argument("--dpi", type=int, default=150)
@@ -706,10 +850,12 @@ def main():
     if unknown:
         p.error(f"unknown figure(s): {sorted(unknown)}; try --list")
 
-    print(f"building {len(names)} figure(s) into {FIG_DIR}")
-    written = build(names, args.dpi)
+    cfg = load_config(args.config)
+    out_dir = Path(args.out) if args.out else FIG_DIR
+    print(f"scene {cfg.name}: building {len(names)} figure(s) into {out_dir}")
+    written = build(names, Scene(cfg), out_dir, args.dpi)
     if not args.only:
-        write_gallery(written)
+        write_gallery(written, cfg)
 
 
 if __name__ == "__main__":

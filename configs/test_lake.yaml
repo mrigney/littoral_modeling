@@ -31,6 +31,19 @@ surface:
     - {size: 23.0, n: 256, band: [0.7, 1.0]}
   choppiness: 1.0               # physical value; do not tune
 
+bathymetry:                     # the synthetic basin, standing in for PHASE 4
+  profile: planar               # planar | embayment
+  shoreline: 400.0              # m, y of the waterline; water below, land above
+  dean_a: 0.100                 # m^(1/3), medium sand.  Stated explicitly rather
+                                # than derived from grain_size so this scene
+                                # matches the value the test suite pins.
+  max_depth: 5.0                # m
+  bank_slope: 0.08
+  dx: 1.0                       # m, field grid spacing
+  surf_dx: 0.25                 # m, refined spacing through the surf zone --
+                                # the surf zone is ~1 m wide, so a 1 m grid
+                                # cannot resolve it at all (cookbook 4.4)
+
 nearshore:
   breaker_index: 0.78
   foam_halflife: 3.0            # s

@@ -13,8 +13,9 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from conftest import CONFIG_PATH as CONFIG_FOR_TESTS
 from pywave import foam as foam_mod
-from pywave import moments, nearshore, spectrum, tiling
+from pywave import load_config, moments, nearshore, spectrum, tiling
 from pywave.bathymetry import DEAN_A, Bathymetry, dean_A_for_grain_size
 
 pytestmark = pytest.mark.gate5
@@ -630,3 +631,108 @@ def test_spinup_window_is_derived_from_the_half_life(record):
         foam_mod.spinup_steps(0.0, 0.25, 3.0)
     with pytest.raises(ValueError):
         foam_mod.foam_decay_factor(0.25, -1.0)
+
+
+# ---------------------------------------------------------------------------
+# The scene file drives the basin
+# ---------------------------------------------------------------------------
+
+
+def test_bathymetry_from_config_round_trips(record, cfg):
+    """`Bathymetry.from_config` honours the scene file and passes validation.
+
+    The coarse and fine grids must describe the *same* beach: a point sampled
+    from either has to land in the same place, or the surf-zone products would
+    silently disagree with the fields the rest of the scene is built on.
+    """
+    coarse = Bathymetry.from_config(cfg)
+    fine = Bathymetry.from_config(cfg, fine=True)
+
+    coarse.validate()
+    fine.validate()
+
+    assert coarse.meta.dx == pytest.approx(cfg.bathymetry.dx)
+    assert fine.meta.dx == pytest.approx(cfg.bathymetry.surf_dx)
+    assert coarse.dean_a == pytest.approx(cfg.bathymetry.a)
+
+    # Same beach, sampled through both grids.
+    x = np.linspace(10.0, cfg.scene.domain[0] - 10.0, 200)
+    y = np.full_like(x, cfg.bathymetry.shoreline - 5.0)
+    d_coarse, s_coarse, _ = coarse.sample(x, y)
+    d_fine, s_fine, _ = fine.sample(x, y)
+
+    worst = float(np.max(np.abs(d_coarse - d_fine)))
+    record("5", "depth from the coarse vs refined grid, 5 m offshore", worst, 0.0,
+           0.05, unit="m",
+           note=f"Grids are {coarse.meta.dx:g} m and {fine.meta.dx:g} m; they "
+                f"describe one beach, so a sample must not depend on which is used.",
+           passed=worst < 0.05)
+    assert worst < 0.05
+    assert np.max(np.abs(s_coarse - s_fine)) < 2.0 * cfg.bathymetry.dx
+
+
+def test_embayment_fine_grid_contains_the_whole_shoreline():
+    """The refined window must not crop the headlands off a curved shore.
+
+    Sizing it from the nominal shoreline alone leaves the bays and headlands --
+    the only part of the scene where refraction does anything interesting --
+    outside the grid entirely.
+    """
+    from dataclasses import replace
+
+    from pywave.config import BathymetryConfig
+
+    base = load_config(CONFIG_FOR_TESTS)
+    bay_cfg = replace(base, bathymetry=BathymetryConfig(
+        profile="embayment", shoreline=400.0, dean_a=0.1, max_depth=5.0,
+        dx=2.0, surf_dx=0.5, amplitude=120.0, wavelength=500.0))
+
+    fine = Bathymetry.from_config(bay_cfg, fine=True)
+    y0, y1 = fine.meta.extent[2], fine.meta.extent[3]
+    assert y1 >= 400.0 + 120.0 - 1e-9, "headland crests cropped"
+    assert y0 <= 400.0 - 120.0, "bay heads cropped"
+    assert (fine.depth > 0).any() and (fine.depth <= 0).any()
+
+
+def test_bathymetry_config_rejects_nonsense():
+    """Bad scene files fail at load, not three modules downstream."""
+    from pywave.config import BathymetryConfig
+
+    with pytest.raises(ValueError, match="profile"):
+        BathymetryConfig(profile="fjord")
+    with pytest.raises(ValueError, match="finer than dx"):
+        BathymetryConfig(dx=0.5, surf_dx=2.0)
+    with pytest.raises(ValueError, match="max_depth"):
+        BathymetryConfig(max_depth=0.0)
+    with pytest.raises(ValueError, match="dean_a"):
+        BathymetryConfig(dean_a=-1.0)
+
+
+def test_shipped_configs_all_load_and_run(record):
+    """Every config in `configs/` is valid and produces a sane scene.
+
+    Cheap insurance: an example config that no longer loads is worse than no
+    example, because it is the first thing anyone copies.
+    """
+    from pywave import tiling
+
+    root = CONFIG_FOR_TESTS.parent
+    found = sorted(root.glob("*.yaml"))
+    assert found, "no configs found"
+
+    rows = []
+    for path in found:
+        c = load_config(path)
+        b = Bathymetry.from_config(c)
+        b.validate()
+        ts = tiling.TileSet.build(c)
+        hs = ts.hs()
+        assert hs > 0
+        assert np.isfinite(hs)
+        # The tiles must actually resolve the peak they were built for.
+        assert max(t.k_nyquist for t in ts.tiles) > c.k_p, (
+            f"{path.name}: no tile resolves k_p = {c.k_p:.3f} rad/m")
+        rows.append(f"{path.stem}: Hs {hs:.3f} m, Tp {1 / c.f_p:.2f} s")
+
+    record("5", "shipped configs that load and build", len(found),
+           note="; ".join(rows) + ".", passed=True)

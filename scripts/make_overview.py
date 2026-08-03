@@ -13,6 +13,7 @@ the code the way a hand-maintained slide would.
 
 from __future__ import annotations
 
+import argparse
 import base64
 import io
 import subprocess
@@ -47,12 +48,12 @@ def _git_sha() -> str:
         return "unknown"
 
 
-def render_data_uris(cfg) -> dict[str, str]:
+def render_data_uris(scene) -> dict[str, str]:
     """Render every registered figure straight to an in-memory PNG data URI."""
     uris = {}
     for name, (fn, _caption) in mf._REGISTRY.items():
         print(f"  {name} ...", end="", flush=True)
-        fig = fn(cfg)
+        fig = fn(scene)
         buf = io.BytesIO()
         fig.savefig(buf, format="png", dpi=WEB_DPI, bbox_inches="tight",
                     facecolor="white")
@@ -63,11 +64,12 @@ def render_data_uris(cfg) -> dict[str, str]:
     return uris
 
 
-def headline_numbers(cfg) -> dict:
+def headline_numbers(scene) -> dict:
     """Everything quoted in the page, computed rather than remembered."""
+    cfg = scene.cfg
     u10, fetch, gamma = cfg.wind.speed, cfg.wind.fetch, cfg.spectrum.gamma
-    ts = tiling.TileSet.build(cfg)
-    beach = Bathymetry.dean_beach()
+    ts = scene.tileset
+    beach = scene.bathy
     omega = 2.0 * np.pi * cfg.f_p
 
     total = moments.mss_above(0.0, u10, fetch, gamma=gamma)
@@ -490,18 +492,33 @@ def build_html(cfg, n, uris, caps) -> str:
 </div>"""
 
 
-def main():
-    cfg = load_config(mf.CONFIG)
-    print("computing headline numbers ...")
-    n = headline_numbers(cfg)
-    print(f"rendering {len(mf._REGISTRY)} figures at {WEB_DPI} dpi")
-    uris = render_data_uris(cfg)
+def build_page(scene, out_path=None) -> Path:
+    """Render the whole page for ``scene`` and write it to ``out_path``."""
+    out_path = Path(out_path or OUT)
+    print("  headline numbers ...", flush=True)
+    n = headline_numbers(scene)
+    print(f"  {len(mf._REGISTRY)} figures at {WEB_DPI} dpi")
+    uris = render_data_uris(scene)
     caps = {name: cap for name, (_, cap) in mf._REGISTRY.items()}
 
-    html = (f"<title>pywave — littoral water surface modelling</title>\n"
-            f"<style>{CSS}</style>\n{build_html(cfg, n, uris, caps)}\n")
-    OUT.write_text(html, encoding="utf-8")
-    print(f"wrote {OUT}  ({OUT.stat().st_size / 1024 / 1024:.2f} MiB)")
+    html = (f"<title>pywave — {scene.cfg.name}</title>\n"
+            f"<style>{CSS}</style>\n{build_html(scene.cfg, n, uris, caps)}\n")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(html, encoding="utf-8")
+    print(f"  wrote {out_path}  ({out_path.stat().st_size / 1024 / 1024:.2f} MiB)")
+    return out_path
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--config", default=str(mf.CONFIG), help="scene YAML")
+    ap.add_argument("--out", default=None, help="output .html path")
+    args = ap.parse_args()
+
+    cfg = load_config(args.config)
+    print(f"scene {cfg.name}")
+    build_page(mf.Scene(cfg), args.out)
 
 
 if __name__ == "__main__":
