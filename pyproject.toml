@@ -14,7 +14,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.4", "matplotlib>=3.8"]
+dev = ["pytest>=7.4", "matplotlib>=3.8", "pillow>=10.0"]
+# Bundles an ffmpeg binary so `scripts/animate.py` can write MP4 without a
+# system install. Optional: without it the script falls back to GIF, which
+# works but is several times larger for the same clip.
+video = ["imageio-ffmpeg>=0.4"]
 
 [tool.setuptools.packages.find]
 include = ["pywave*"]

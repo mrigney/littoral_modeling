@@ -4,12 +4,12 @@
 
 | | |
 |---|---|
-| generated | 2026-08-03 13:05:49 UTC |
-| git_sha | `2e4938970b1efb64e5d071d04bf0966c98f365e2` |
+| generated | 2026-08-03 13:41:03 UTC |
+| git_sha | `0cbeb0f0f6bf661bae5de720dc6529319eb68180 (working tree dirty)` |
 | scene | `configs/test_lake.yaml` |
 | python | 3.14.5 (Windows AMD64) |
 | numpy / scipy | 2.5.1 / 1.18.0 |
-| checks recorded | 95 |
+| checks recorded | 96 |
 | exit status | PASS |
 
 Every number below was measured by the test suite against the implementation in this commit. Tolerances are the gate criteria from `littoral-water-implementation-cookbook.md`, except where a deviation is recorded in [Gate deviations](#gate-deviations).
@@ -174,6 +174,7 @@ Notes:
 | spin-up steps for 0.5% residual at 30 fps | 688 | -- | -- | -- | PASS |
 | depth from the coarse vs refined grid, 5 m offshore | 3.0543e-04 m | 0 m | -- | 5.0e-02 | PASS |
 | shipped configs that load and build | 2 | -- | -- | -- | PASS |
+| cropped vs parent bathymetry, worst sampling difference | 0 | 0 | -- | 1.0e-12 | PASS |
 
 Notes:
 
@@ -207,6 +208,7 @@ Notes:
 - **spin-up steps for 0.5% residual at 30 fps** -- = 22.9 s of simulated time. At the 0.25 s foam step the same window is 92 steps, which is why foam does not sub-step at the frame rate.
 - **depth from the coarse vs refined grid, 5 m offshore** -- Grids are 1 m and 0.25 m; they describe one beach, so a sample must not depend on which is used.
 - **shipped configs that load and build** -- coastal_bay: Hs 1.432 m, Tp 4.75 s; test_lake: Hs 0.085 m, Tp 1.05 s.
+- **cropped vs parent bathymetry, worst sampling difference** -- Parent (200, 4000), crop (81, 1001). The crop carries its own origin, so world coordinates are unchanged.
 
 ## Gate deviations
 

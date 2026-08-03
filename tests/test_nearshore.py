@@ -736,3 +736,40 @@ def test_shipped_configs_all_load_and_run(record):
 
     record("5", "shipped configs that load and build", len(found),
            note="; ".join(rows) + ".", passed=True)
+
+
+def test_bathymetry_crop_preserves_world_coordinates(record, cfg):
+    """A cropped grid and its parent must sample identically.
+
+    The crop exists so animation and other per-cell loops touch only the window
+    they render; if it shifted the georeferencing it would move the shoreline
+    under everything that used it, which no scalar check would notice.
+    """
+    parent = Bathymetry.from_config(cfg, fine=True)
+    x0, x1, y0, y1 = parent.meta.extent
+    xr = (x0 + 0.30 * (x1 - x0), x0 + 0.55 * (x1 - x0))
+    yr = (y0 + 0.30 * (y1 - y0), y0 + 0.70 * (y1 - y0))
+    sub = parent.crop(xr, yr)
+
+    assert sub.meta.dx == parent.meta.dx
+    assert sub.meta.shape[0] < parent.meta.shape[0] or \
+        sub.meta.shape[1] < parent.meta.shape[1]
+    sub.validate()
+
+    x = np.linspace(xr[0] + 1.0, xr[1] - 1.0, 97)
+    y = np.full_like(x, 0.5 * (yr[0] + yr[1]))
+    dp, sp, np_ = parent.sample(x, y)
+    dc, sc, nc = sub.sample(x, y)
+
+    worst = max(float(np.abs(dp - dc).max()), float(np.abs(sp - sc).max()),
+                float(np.abs(np_ - nc).max()))
+    record("5", "cropped vs parent bathymetry, worst sampling difference",
+           worst, 0.0, 1e-12,
+           note=f"Parent {parent.meta.shape}, crop {sub.meta.shape}. The crop "
+                f"carries its own origin, so world coordinates are unchanged.",
+           passed=worst == 0.0)
+    assert worst == 0.0
+
+    # Out-of-range requests clamp rather than produce a degenerate grid.
+    edge = parent.crop((x0 - 1e6, x0 - 1e5), (y0 - 1e6, y0 - 1e5))
+    assert edge.meta.shape[0] >= 2 and edge.meta.shape[1] >= 2

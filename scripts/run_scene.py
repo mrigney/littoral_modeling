@@ -4,6 +4,7 @@
     python scripts/run_scene.py configs/my_scene.yaml        # your own
     python scripts/run_scene.py my_scene.yaml --out /tmp/run # somewhere else
     python scripts/run_scene.py my_scene.yaml --quick        # figures only, no data
+    python scripts/run_scene.py my_scene.yaml --animate      # add the video clips
 
 Point it at a scene YAML and it produces, in one directory:
 
@@ -13,6 +14,8 @@ Point it at a scene YAML and it produces, in one directory:
     overview.html       one self-contained page you can mail to someone
     figures/*.png       eight figures
     channels/*.npy      the per-cell nearshore fields, plus a manifest
+    open.mp4            open-water animation      (--animate)
+    shore.mp4           shoreline animation       (--animate)
 
 Nothing here is hard-coded to the shipped scene: change the wind, the fetch, the
 beach, and every figure, number and channel follows. That is the point -- a
@@ -265,6 +268,7 @@ def write_summary_md(summary: dict, path: Path) -> None:
         "| `figures/` | Eight PNGs at 150 dpi. |",
         "| `channels/` | Per-cell nearshore fields as `.npy`, with `manifest.json`. |",
         "| `summary.json` | Everything in this report, machine-readable. |",
+        "| `open.*` / `shore.*` | Animations, if `--animate` was passed. |",
         "",
     ]
     path.write_text("\n".join(lines), encoding="utf-8")
@@ -351,6 +355,10 @@ def main() -> int:
                     help="output directory (default: runs/<scene name>)")
     ap.add_argument("--quick", action="store_true",
                     help="skip the channel export and the HTML page")
+    ap.add_argument("--animate", action="store_true",
+                    help="also render the open-water and shoreline clips "
+                         "(adds a few minutes)")
+    ap.add_argument("--animate-seconds", type=float, default=5.0)
     ap.add_argument("--dpi", type=int, default=150)
     args = ap.parse_args()
 
@@ -403,6 +411,21 @@ def main() -> int:
 
         print("building the self-contained page ...", flush=True)
         mo.build_page(scene, out / "overview.html")
+
+    if args.animate:
+        import animate as anm
+
+        fmt = "mp4" if anm._ffmpeg_path() else "gif"
+        fps, px = 20.0, 640
+        n = max(int(round(args.animate_seconds * fps)), 2)
+        times = np.arange(n) / fps
+        print(f"rendering animations ({n} frames, {fmt}) ...", flush=True)
+        for mode in ("open", "shore"):
+            producer = (anm.OpenWater(scene, px) if mode == "open"
+                        else anm.Shoreline(scene, px, fps))
+            frames = [producer.frame(float(t)) for t in times]
+            path = anm.write_frames(frames, out / f"{mode}.{fmt}", fps, fmt)
+            print(f"  {path.name}  {path.stat().st_size / 1024 / 1024:.2f} MiB")
 
     print(f"\ndone in {time.perf_counter() - t_start:.0f} s")
     print(f"  start here:  {out / 'summary.md'}")

@@ -295,6 +295,38 @@ class Bathymetry:
         return cls(meta=meta, depth=depth, sdf=sdf,
                    shore_normal=shore_normal, dean_a=float(dean_a))
 
+    def crop(self, x_range: tuple[float, float],
+             y_range: tuple[float, float]) -> "Bathymetry":
+        """A view-sized sub-grid, keeping world coordinates.
+
+        The origin moves with the crop, so a point sampled from the crop and the
+        same point sampled from the parent land in the same place.
+
+        Exists because anything that iterates over the grid -- foam advection
+        above all -- costs the whole domain otherwise. A 200 m animation window
+        on a 4 km scene touches under 2% of the cells, and stepping the other
+        98% every frame is pure waste.
+        """
+        x0, y0 = self.meta.origin
+        dx = self.meta.dx
+        ny, nx = self.meta.shape
+
+        i0 = int(np.clip(np.floor((y_range[0] - y0) / dx), 0, ny - 2))
+        i1 = int(np.clip(np.ceil((y_range[1] - y0) / dx) + 1, i0 + 2, ny))
+        j0 = int(np.clip(np.floor((x_range[0] - x0) / dx), 0, nx - 2))
+        j1 = int(np.clip(np.ceil((x_range[1] - x0) / dx) + 1, j0 + 2, nx))
+
+        meta = GridMeta(origin=(x0 + j0 * dx, y0 + i0 * dx), dx=dx,
+                        shape=(i1 - i0, j1 - j0),
+                        water_level=self.meta.water_level, epsg=self.meta.epsg)
+        return Bathymetry(
+            meta=meta,
+            depth=self.depth[i0:i1, j0:j1].copy(),
+            sdf=self.sdf[i0:i1, j0:j1].copy(),
+            shore_normal=self.shore_normal[:, i0:i1, j0:j1].copy(),
+            dean_a=self.dean_a,
+        )
+
     # -- derived -------------------------------------------------------------
 
     @property

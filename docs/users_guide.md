@@ -1100,3 +1100,59 @@ About 40 s for the test lake, roughly two minutes for the coastal bay — the co
 is dominated by tile construction, which scales with the FFT grids, and by the
 foam spin-up. `--quick` skips the channel export and the HTML page and roughly
 halves it.
+
+### Animations
+
+```bash
+python scripts/animate.py                          # both views, test lake
+python scripts/animate.py --mode shore --seconds 8
+python scripts/animate.py configs/coastal_bay.yaml --start 3600
+python scripts/run_scene.py configs/my_scene.yaml --animate   # as part of a run
+```
+
+**`open`** looks straight down at open water — the composite surface evolving,
+waves travelling along the wind.
+
+**`shore`** is a plan view across the waterline: waves shoaling in, the breaker
+line, foam in the surf band, and the swash edge advancing and retreating at the
+peak period over wet sand. This is the view that shows what the nearshore model
+is actually for.
+
+`--start` is free. The surface is a pure function of `t`, so rendering an hour
+into the scenario costs exactly what rendering the first second costs — no
+spin-up, no drift.
+
+#### Format
+
+MP4 when ffmpeg is available, animated GIF otherwise. GIF works with no extra
+install, but wave texture is close to the worst case for it — high-entropy
+noise squeezed into 256 colours — so expect several megabytes for a few seconds.
+
+```bash
+pip install -e ".[video]"     # bundles an ffmpeg binary; no system install
+```
+
+That gets you MP4 at roughly a tenth the size, encoded `libx264 / yuv420p` so it
+plays in QuickTime, PowerPoint and browsers. Without the `yuv420p` constraint
+ffmpeg picks a 4:4:4 profile that several of those silently refuse.
+
+#### What animates, and what does not
+
+The wave surface, the swash edge and the wet-sand band all evolve with `t`.
+
+**Foam does not pulse.** Breaking in this model is a *statistical* condition
+(`Hs_local > γ_b·d`), not an instantaneous one, so the seeding region is steady
+and the foam field sits near its equilibrium. Individual breaking events would
+need a wave-by-wave model, which is well outside Phase 5. Foam is stepped
+sequentially across the animation frames rather than cold-started per frame —
+sequential generation is precisely the case where that is legitimate, since the
+bounded spin-up machinery exists to support *random* access.
+
+#### A note on what the test lake looks like
+
+Undramatic, and correctly so. At 5 m/s over 1 km of fetch the waves are 8.6 cm,
+the surf zone is a metre wide and foam coverage peaks around 0.27. The shoreline
+clip shows a thin wet band and a modest white line, because that is what such a
+lake does. `coastal_bay.yaml` — 1.43 m waves, a 48.6 m surf zone, plunging
+breakers — is the scene to look at if you want to see the nearshore model
+working hard.

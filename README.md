@@ -44,6 +44,7 @@ Everything lands in `runs/my_scene/`:
 | `figures/*.png` | The figures on their own, 150 dpi. |
 | `channels/*.npy` | Per-cell nearshore fields + `manifest.json` — what Phase 6 will consume. |
 | `summary.json` | Every number in `summary.md`, machine-readable. |
+| `open.mp4`, `shore.mp4` | Animations, with `--animate`. |
 
 Takes about 40 s for a small lake, a couple of minutes for a large coastal scene.
 Add `--quick` to skip the channel export and the HTML page.
@@ -55,6 +56,29 @@ spilling breakers, 0.4 m swash) and [`coastal_bay.yaml`](configs/coastal_bay.yam
 swash). Every figure, number and channel is derived from the config, so a
 disagreement with the validation report means the code changed — not that the
 picture went stale.
+
+## Watch it move
+
+```bash
+python scripts/animate.py                          # both views, test lake
+python scripts/animate.py --mode shore             # just the shoreline
+python scripts/animate.py configs/coastal_bay.yaml --seconds 8
+```
+
+Two views: **open** looks straight down at open water, and **shore** is a plan
+view across the waterline showing shoaling waves, the breaker line, foam in the
+surf band and the swash edge breathing at the peak period over wet sand.
+
+Writes MP4 when ffmpeg is available and animated GIF otherwise. GIF works out of
+the box but wave texture compresses badly in 256 colours — expect several MB.
+For files about a tenth the size, and playable anywhere:
+
+```bash
+pip install -e ".[video]"      # bundles an ffmpeg binary, no system install
+```
+
+Because the surface is a pure function of time, `--start 3600` renders an hour
+into the scenario and costs exactly what `--start 0` costs.
 
 Individual pieces, if you want just one:
 
@@ -141,6 +165,7 @@ tests/
   make_baseline.py        regenerates tests/baseline/ (a deliberate act)
 scripts/
   run_scene.py     config -> every artifact, in one directory
+  animate.py       open-water and shoreline clips
   make_figures.py  the eight figures + a markdown gallery
   make_overview.py one self-contained shareable HTML page
 configs/
