@@ -1,0 +1,311 @@
+"""PHASE 2 -- multi-tile composition.
+
+A single FFT tile is exactly periodic at its own size, and the repetition is
+far more visible than it looks: specular glint makes it obvious, because the eye
+(and a change detector) locks onto repeated sparkle patterns much more readily
+than onto repeated displacement.
+
+The fix is to sum several tiles with incommensurate sizes, each carrying a
+**disjoint** band of the spectrum, each with its own rotation.  Disjointness is
+what makes the sum valid -- variances add only for uncorrelated components, so
+overlapping bands would double-count energy and the composite would no longer
+integrate to ``m0``.  ``SurfaceConfig`` validates the fractions are contiguous
+and non-overlapping; :func:`band_edges` maps them onto real wavenumbers and
+validates that each band fits inside the tile that carries it.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import numpy as np
+
+from .config import Config
+from .constants import G, JONSWAP_GAMMA
+from .surface import SurfaceField, WaveTile
+
+__all__ = [
+    "GOLDEN_ANGLE",
+    "band_edges",
+    "tile_rotations",
+    "sample_bilinear_periodic",
+    "sample_periodic",
+    "TileSet",
+    "composite_surface",
+]
+
+GOLDEN_ANGLE = np.pi * (3.0 - np.sqrt(5.0))
+"""~137.5 deg.  Successive multiples are maximally non-repeating, which is what
+we want for decorrelating tile lattices.
+
+Rotations are derived from the tile *index*, not from the RNG.  Cookbook
+section 0.3 says the seed is used in ``initial_amplitudes`` and nowhere else;
+drawing rotations from it would quietly violate that and make the surface
+depend on the seed through two independent paths.
+"""
+
+
+def tile_rotations(n_tiles: int) -> tuple[float, ...]:
+    """Deterministic per-tile grid rotations [rad], CCW."""
+    return tuple(float((i * GOLDEN_ANGLE) % (2.0 * np.pi)) for i in range(n_tiles))
+
+
+def band_edges(tiles) -> tuple[tuple[float, float], ...]:
+    """Map config band *fractions* onto wavenumber edges [rad/m].
+
+    The cookbook describes ``band`` as "fractions of the radial wavenumber
+    range" without pinning what that range is.  It has to be pinned, because the
+    obvious reading does not work: taking fractions of ``[0, max_i k_nyq_i]``
+    puts the middle band at ``[12.2, 24.5]`` for the shipped test config, and
+    the tile assigned to carry it has a Nyquist of 21.7 -- so the top of its own
+    band is unrepresentable on its own grid, and that energy vanishes silently.
+
+    The interpretation used here, which does work:
+
+    * ``k_ref = min_i k_nyquist_i`` -- the most restrictive tile sets the scale,
+      guaranteeing every interior band fits on the grid that carries it.
+    * Interior edges are ``fraction * k_ref``.
+    * The topmost band (``fraction == 1.0``) extends to *its own* tile's
+      Nyquist rather than to ``k_ref``, so the finest tile contributes all the
+      resolution it actually has instead of throwing the top octave away.
+
+    For the shipped test config (Nyquists 25.1 / 21.7 / 35.0 rad/m) this gives
+    ``[0, 7.6) [7.6, 15.2) [15.2, 35.0)``, each comfortably inside its tile.
+
+    Raises
+    ------
+    ValueError
+        If any band falls outside the resolvable range of its tile.  Silently
+        clipping instead would lose variance and break the Gate 2 composite Hs
+        check in a way that is very hard to trace back to here.
+    """
+    tiles = list(tiles)
+    k_ref = min(t.k_nyquist for t in tiles)
+
+    edges = []
+    for t in tiles:
+        lo_frac, hi_frac = t.band
+        lo = lo_frac * k_ref
+        hi = t.k_nyquist if hi_frac >= 1.0 else hi_frac * k_ref
+        if hi > t.k_nyquist * (1.0 + 1e-12):
+            raise ValueError(
+                f"tile size={t.size} n={t.n} has Nyquist {t.k_nyquist:.3f} rad/m "
+                f"but its band reaches {hi:.3f} rad/m -- it cannot represent its "
+                f"own band"
+            )
+        if lo > 0.0 and lo < t.k_min:
+            raise ValueError(
+                f"tile size={t.size} n={t.n} has k_min {t.k_min:.3f} rad/m "
+                f"but its band starts at {lo:.3f} rad/m"
+            )
+        edges.append((float(lo), float(hi)))
+    return tuple(edges)
+
+
+# ---------------------------------------------------------------------------
+# Periodic sampling
+# ---------------------------------------------------------------------------
+
+
+def sample_bilinear_periodic(field: np.ndarray, x, y, size: float) -> np.ndarray:
+    """Bilinear sample of a periodic ``[y, x]`` field at world coordinates.
+
+    Retained for reference and for the interpolator comparison test.  Production
+    sampling uses :func:`sample_periodic`, which defaults to cubic -- see there
+    for why bilinear is not good enough.
+    """
+    n = field.shape[0]
+    dx = size / n
+
+    u = np.asarray(x, dtype=np.float64) / dx
+    v = np.asarray(y, dtype=np.float64) / dx
+
+    j0 = np.floor(u)
+    i0 = np.floor(v)
+    fu = u - j0
+    fv = v - i0
+
+    j0 = j0.astype(np.int64) % n
+    i0 = i0.astype(np.int64) % n
+    j1 = (j0 + 1) % n
+    i1 = (i0 + 1) % n
+
+    return (
+        field[i0, j0] * (1 - fu) * (1 - fv)
+        + field[i0, j1] * fu * (1 - fv)
+        + field[i1, j0] * (1 - fu) * fv
+        + field[i1, j1] * fu * fv
+    )
+
+
+def sample_periodic(field: np.ndarray, x, y, size: float, order: int = 3) -> np.ndarray:
+    """Sample a periodic ``[y, x]`` field at world coordinates.
+
+    ``field`` is ``(n, n)`` covering ``[0, size)`` in both axes with wraparound.
+    Coordinates outside the tile wrap, which is exactly the periodicity the
+    rotations and incommensurate sizes exist to hide.
+
+    Why cubic and not bilinear
+    --------------------------
+    Bilinear interpolation is a low-pass filter, and the tiles carry meaningful
+    energy right up to their Nyquist.  For a sinusoid at wavenumber ``k`` on a
+    grid of spacing ``d``, sampled at a uniformly-distributed sub-cell offset,
+    the retained power is ``int_0^1 |1 - u + u e^(ikd)|^2 du``, which at the
+    Nyquist ``kd = pi`` is ``int_0^1 (1-2u)^2 du = 1/3``.  Two thirds of the
+    power in the top octave is destroyed.
+
+    That is not an artefact of a test harness -- Phase 6 samples this composite
+    at every mesh vertex, so bilinear would quietly shave variance off the
+    delivered surface and, worse, shave it preferentially from the *high*
+    wavenumbers, which is exactly the content the LOD invariant is accounting
+    for.  Measured on the shipped test config, bilinear loses ~6% of Hs and
+    cubic ~1%.
+
+    ``order=1`` selects bilinear for comparison; ``order=3`` is an interpolating
+    cubic spline (exact at the nodes, far flatter passband).
+    """
+    from scipy.ndimage import map_coordinates
+
+    n = field.shape[0]
+    dx = size / n
+    coords = np.stack([
+        np.asarray(y, dtype=np.float64) / dx,
+        np.asarray(x, dtype=np.float64) / dx,
+    ])
+    return map_coordinates(field, coords, order=order, mode="grid-wrap")
+
+
+# ---------------------------------------------------------------------------
+# Tile set
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class TileSet:
+    """A set of band-limited tiles that sum to the full-band surface."""
+
+    tiles: tuple[WaveTile, ...]
+
+    @classmethod
+    def build(
+        cls,
+        cfg: Config,
+        depth: float | None = None,
+    ) -> "TileSet":
+        """Build the tile set described by a :class:`~pywave.config.Config`.
+
+        Per-tile RNG streams are spawned from the single config seed with
+        ``SeedSequence``.  That keeps "one integer in config" true while giving
+        each tile an independent, reproducible stream -- reusing the same
+        integer for every tile would correlate the tiles' phases and produce a
+        surface whose bands are locked together.
+        """
+        edges = band_edges(cfg.surface.tiles)
+        rotations = tile_rotations(len(cfg.surface.tiles))
+        children = np.random.SeedSequence(cfg.spectrum.seed).spawn(
+            len(cfg.surface.tiles)
+        )
+
+        tiles = tuple(
+            WaveTile.build(
+                size=tc.size,
+                n=tc.n,
+                u10=cfg.wind.speed,
+                fetch=cfg.wind.fetch,
+                theta_wind=cfg.wind.direction_rad,
+                seed=child,
+                band=band,
+                rotation=rot,
+                depth=depth,
+                gamma=cfg.spectrum.gamma,
+                spreading_model=cfg.spectrum.spreading,
+            )
+            for tc, band, rot, child in zip(
+                cfg.surface.tiles, edges, rotations, children
+            )
+        )
+        return cls(tiles)
+
+    # -- aggregate spectral properties --------------------------------------
+
+    def m0(self) -> float:
+        """Total height variance across all bands [m^2].
+
+        Valid as a plain sum precisely because the bands are disjoint.
+        """
+        return float(sum(t.m0() for t in self.tiles))
+
+    def mss(self) -> float:
+        """Total resolved slope variance across all bands [-]."""
+        return float(sum(t.mss() for t in self.tiles))
+
+    def hs(self) -> float:
+        return 4.0 * np.sqrt(self.m0())
+
+    @property
+    def k_max(self) -> float:
+        """Highest wavenumber the composite resolves [rad/m]."""
+        return max(t.band[1] for t in self.tiles)
+
+    def evaluate_grids(self, t: float) -> tuple[SurfaceField, ...]:
+        """Evaluate every tile on its own grid.  Cache this if sampling repeatedly."""
+        return tuple(tile.evaluate(t) for tile in self.tiles)
+
+    def sample(self, x, y, t: float, fields=None, order: int = 3) -> SurfaceField:
+        """Sample the composite surface at world coordinates ``(x, y)``, time ``t``."""
+        return composite_surface(self.tiles, x, y, t, fields=fields, order=order)
+
+
+def composite_surface(tiles, x, y, t: float, fields=None, order: int = 3) -> SurfaceField:
+    """Sum tiles sampled at ``(x, y) mod tile size``, each with its own rotation.
+
+    Frames and rotations
+    --------------------
+    Each tile's grid is rotated by ``phi`` relative to world.  So:
+
+    1. World sample points are rotated *into* the tile frame by ``-phi``.
+    2. The tile is evaluated there.
+    3. Vector-valued results -- horizontal displacement and slope -- are rotated
+       *back* by ``+phi``.
+
+    Step 3 is easy to forget and produces a surface whose normals are subtly
+    wrong per tile in a way that averages out in ``mss`` and therefore survives
+    every scalar check.  It shows up only as anisotropy pointing the wrong way,
+    which in Phase 7 means glint elongated along the wrong axis.
+
+    (The counter-rotation of the wind direction that keeps wave headings correct
+    happens at tile *construction*; see ``WaveTile.build``.)
+    """
+    x = np.asarray(x, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    if fields is None:
+        fields = [tile.evaluate(t) for tile in tiles]
+
+    total = None
+    for tile, field in zip(tiles, fields):
+        phi = tile.rotation
+        c, s = np.cos(phi), np.sin(phi)
+
+        # world -> tile frame
+        xl = c * x + s * y
+        yl = -s * x + c * y
+
+        h = sample_periodic(field.h, xl, yl, tile.size, order)
+        dxl = sample_periodic(field.dx_disp, xl, yl, tile.size, order)
+        dyl = sample_periodic(field.dy_disp, xl, yl, tile.size, order)
+        sxl = sample_periodic(field.slope_x, xl, yl, tile.size, order)
+        syl = sample_periodic(field.slope_y, xl, yl, tile.size, order)
+
+        # tile frame -> world, for the vector quantities only
+        contribution = SurfaceField(
+            h=h,
+            dx_disp=c * dxl - s * dyl,
+            dy_disp=s * dxl + c * dyl,
+            slope_x=c * sxl - s * syl,
+            slope_y=s * sxl + c * syl,
+        )
+        total = contribution if total is None else total + contribution
+
+    if total is None:
+        raise ValueError("composite_surface requires at least one tile")
+    return total

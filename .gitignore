@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# Claude Code local overrides
+.claude/settings.local.json
+
+# Generated artifacts that are NOT the V&V record
+# (docs/validation_report.md IS committed -- it is the V&V artifact)
+docs/figures/
+*.ply
+*.npy
+!tests/baseline/*.npy

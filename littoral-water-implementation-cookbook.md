@@ -1,0 +1,1017 @@
+# Littoral Water for EMBER — Implementation Cookbook
+
+*End-to-end work plan: spectrum code → Houdini terrain → nearshore transformation → mesh export → Mitsuba BSDF → EMBER integration.*
+
+**Status:** design document, pre-implementation
+**Target scene:** 1 km × 1 km test domain, lake with ~1 km fetch, 5 m/s wind
+**Target sensors:** LWIR microbolometer (primary), MWIR, EO — co-registered
+**Companion doc:** `water-surface-modeling-primer.md` (the physics background)
+
+---
+
+## How to use this document
+
+This is written to be worked through in order. Each phase ends with a **gate** — a concrete, checkable condition. Do not proceed past a gate that hasn't passed; every one of them catches a class of error that becomes very expensive to diagnose three phases later.
+
+If you're handing sections to Claude Code, the useful unit of work is one phase at a time, with §0.3 (conventions) and §0.4 (data contracts) supplied as context every time. Those two sections are the interface definitions; almost all cross-module bugs come from violating them silently.
+
+Phases 1–3 are pure Python with no external dependencies beyond numpy/scipy, so they're the natural starting point and they're independently testable. Phase 4 needs Houdini. Phase 7 needs a Mitsuba build environment.
+
+---
+
+## 0. Foundations
+
+### 0.1 Architecture
+
+```
+   ┌───────────────────────────────────────────┐
+   │  PHASE 1-3   pywave/  (numpy, standalone) │
+   │  spectrum → FFT surface → validation      │
+   └───────────────────┬───────────────────────┘
+                       │ h(x,t), slopes, mss
+   ┌───────────────────▼───────────────────────┐
+   │  PHASE 4     Houdini / Forge              │
+   │  terrain, basin, shoreline, SDF, depth    │
+   └───────────────────┬───────────────────────┘
+                       │ depth.npy, sdf.npy, shore_normal.npy
+   ┌───────────────────▼───────────────────────┐
+   │  PHASE 5-6   pywave/nearshore + export    │
+   │  shoaling, refraction, breaking, meshing  │
+   └───────────────────┬───────────────────────┘
+                       │ water_####.ply + channels
+   ┌───────────────────▼───────────────────────┐
+   │  PHASE 7-8   Mitsuba plugin (C++)         │
+   │  roughwater BSDF + emissivity table       │
+   └───────────────────┬───────────────────────┘
+                       │
+   ┌───────────────────▼───────────────────────┐
+   │  PHASE 9     EMBER integration            │
+   │  Spark scene assembly, Hotts coupling     │
+   └───────────────────────────────────────────┘
+```
+
+**Design principle running through all of it:** the spectrum is the single source of truth. Wave height, slope statistics, BSDF roughness, and LOD behavior are all derived from one `S(k)` function. Nothing is tuned independently. If two things disagree, the spectrum wins and the other one has a bug.
+
+### 0.2 Repository layout
+
+```
+littoral/
+├── pywave/
+│   ├── __init__.py
+│   ├── constants.py          # g, water optical constants
+│   ├── spectrum.py           # PHASE 1: JONSWAP, spreading, S(f)→S(k)
+│   ├── moments.py            # PHASE 1: m0, m2, mss_above(k)
+│   ├── surface.py            # PHASE 2: Tessendorf FFT synthesis
+│   ├── tiling.py             # PHASE 2: multi-tile composition
+│   ├── nearshore.py          # PHASE 5: shoaling, refraction, breaking
+│   ├── foam.py               # PHASE 5: foam advection/decay
+│   ├── mesh.py               # PHASE 6: displaced mesh generation
+│   ├── channels.py           # PHASE 6: per-vertex attribute packing
+│   ├── export.py             # PHASE 6: PLY/NetCDF writers
+│   └── config.py             # scene config dataclass + YAML load
+├── tests/
+│   ├── test_spectrum.py      # PHASE 3 gates
+│   ├── test_surface.py
+│   ├── test_nearshore.py
+│   └── test_reproducibility.py
+├── houdini/
+│   ├── build_terrain.hip
+│   └── export_fields.py      # HDA python: heightfield → npy
+├── mitsuba/
+│   ├── roughwater.cpp        # PHASE 7
+│   ├── watermedium.cpp       # PHASE 7 (optional, EO only)
+│   └── build_emissivity.py   # PHASE 8
+├── configs/
+│   └── test_lake.yaml
+└── docs/
+    └── validation_report.md  # accumulates gate results — this is the V&V artifact
+```
+
+### 0.3 Conventions — fix these now, in writing
+
+Violating any of these silently is the most common source of multi-day debugging. Put this table in a docstring in `constants.py`.
+
+| Item | Convention |
+|---|---|
+| **Coordinates** | Right-handed, **Z up**. X east, Y north. Houdini is Y-up — conversion happens **once**, at export from Houdini, nowhere else. |
+| **Units** | Metres, seconds, radians internally. Degrees only in config files and only for angles a human types. |
+| **Angular frequency** | `ω` (rad/s) everywhere in code. `f` (Hz) only inside `spectrum.py` where JONSWAP is defined in Hz. Never mix in one expression. |
+| **Wavenumber** | `k` in rad/m (`k = 2π/λ`). Not cycles/m. |
+| **Direction convention** | `θ` = direction waves travel **toward**, measured CCW from +X. Oceanographers often use "coming from" — we don't. State it in every docstring. |
+| **Water plane** | `z = z_w`, a scene constant. Wave displacement is relative to it. |
+| **Depth sign** | `d > 0` in water, `d < 0` on land. Depth = `z_w − z_terrain`. |
+| **SDF sign** | `s < 0` in water, `s > 0` on land. **Opposite of depth** — deliberate, so `s` reads as "distance inland". Assert the sign relationship in tests. |
+| **FFT convention** | numpy default. `ifft2` includes the `1/N²`. Always multiply by `N²` when going from spectral amplitudes to spatial field. |
+| **Time origin** | `t = 0` is scenario start. Surface is a pure function of `t`. No accumulated state, ever. |
+| **Random seed** | One integer in config. Used only in `spectrum.initial_amplitudes()`. Nowhere else. |
+
+### 0.4 Data contracts
+
+These are the interfaces between phases. Define them as dataclasses and validate on construction.
+
+**Terrain fields** (Houdini → Python), all `float32`, shape `(NY, NX)`, C-order, `[y, x]` indexing:
+
+| File | Contents | Units |
+|---|---|---|
+| `terrain_z.npy` | terrain elevation | m |
+| `depth.npy` | `z_w − terrain_z`, positive in water | m |
+| `sdf.npy` | signed distance to shoreline, positive inland | m |
+| `shore_normal.npy` | `(NY, NX, 2)`, unit vector pointing inland | — |
+| `bottom_type.npy` | `uint8` class index | — |
+| `grid_meta.json` | `x0, y0, dx, dy, nx, ny, z_w, epsg` | — |
+
+**Water surface frame** (Python → Mitsuba):
+
+| File | Contents |
+|---|---|
+| `water_####.ply` | binary PLY, displaced mesh, per-vertex custom properties below |
+| `water_####.json` | frame metadata: `t`, `wind_speed`, `wind_dir`, `seed`, `git_sha` |
+
+Per-vertex properties on the PLY:
+
+| Property | Type | Meaning |
+|---|---|---|
+| `x, y, z` | f32 | displaced position (m, scene coords) |
+| `nx, ny, nz` | f32 | analytic normal from spectral slopes |
+| `mss` | f32 | sub-mesh mean square slope, **this LOD** |
+| `wdir_x, wdir_y` | f32 | local wave direction, for anisotropy frame |
+| `aniso` | f32 | crosswind/upwind variance ratio |
+| `depth` | f32 | local water depth (m) |
+| `foam` | f32 | foam coverage fraction 0–1 |
+
+Keeping `mss` per-vertex rather than global is what makes the LOD invariant (§6.4) enforceable.
+
+### 0.5 Config file
+
+```yaml
+# configs/test_lake.yaml
+scene:
+  domain: [1000.0, 1000.0]      # m
+  water_level: 100.0            # m, z_w
+  epsg: 32616
+
+wind:
+  speed: 5.0                    # m/s at 10 m reference
+  direction: 45.0               # deg CCW from +X, direction blowing TOWARD
+  fetch: 1000.0                 # m
+
+spectrum:
+  model: jonswap
+  gamma: 3.3
+  spreading: donelan
+  seed: 20260801
+
+surface:
+  tiles:                        # incommensurate, see §2.4
+    - {size: 64.0, n: 512, band: [0.0, 0.35]}
+    - {size: 37.0, n: 256, band: [0.35, 0.7]}
+    - {size: 23.0, n: 256, band: [0.7, 1.0]}
+  choppiness: 1.0               # physical value; do not tune
+
+nearshore:
+  breaker_index: 0.78
+  foam_halflife: 3.0            # s
+  refraction: true
+  shoaling: true
+
+output:
+  fps: 30.0
+  mesh_dx: 0.125                # m, water mesh post spacing
+  lod_rings: [{r: 100.0, dx: 0.125}, {r: 300.0, dx: 0.5}, {r: 1e9, dx: 2.0}]
+```
+
+---
+
+## PHASE 1 — Spectrum module
+
+**Deliverable:** `pywave/spectrum.py`, `pywave/moments.py`
+**Estimate:** 1 week
+**Depends on:** nothing
+
+This is the foundation. Everything downstream inherits its errors, so it gets the most careful testing.
+
+### 1.1 JONSWAP in frequency
+
+```python
+def jonswap_sf(f, U10, fetch, gamma=3.3, g=9.81):
+    """
+    JONSWAP spectral density S(f) [m^2/Hz].
+
+    f     : array of frequencies [Hz], f > 0
+    U10   : wind speed at 10 m [m/s]
+    fetch : fetch length [m]
+    """
+```
+
+Implement exactly as in the primer §2:
+
+```
+X_tilde = g * fetch / U10**2
+alpha   = 0.076 * X_tilde**(-0.22)
+f_p     = 3.5 * (g / U10) * X_tilde**(-0.33)
+sigma   = where(f <= f_p, 0.07, 0.09)
+r       = exp(-(f - f_p)**2 / (2 * sigma**2 * f_p**2))
+S       = alpha * g**2 * (2*pi)**(-4) * f**(-5) \
+          * exp(-1.25 * (f_p/f)**4) * gamma**r
+```
+
+Guard `f = 0` (returns inf). Clamp to zero below some `f_min`.
+
+**Immediate check before writing anything else:** integrate numerically and confirm `4√(∫S df)` matches the closed-form fetch-limited `Hs`:
+
+```
+Hs = 0.0016 * (U10**2 / g) * sqrt(X_tilde)
+```
+
+For the test lake this should give ≈ 0.08 m and `f_p` ≈ 0.95 Hz. If it doesn't, stop here.
+
+### 1.2 Directional spreading
+
+```python
+def spreading(theta, f, f_p, theta_wind, model="donelan"):
+    """Normalized D(f, theta), ∫D dtheta = 1."""
+```
+
+Start with `cos^(2s)` and a frequency-dependent `s`:
+
+```
+s = 11.5 * (f/f_p)**(-2.5)   for f > f_p
+s = 9.77 * (f/f_p)**(4.06)   for f <= f_p
+D = N(s) * cos(0.5*(theta - theta_wind))**(2*s)
+```
+
+Normalize `N(s)` numerically rather than with the gamma-function closed form — it's less error-prone and this isn't a hot path. **Assert `∫D dθ = 1` to 1e-6 in a test**; a broken normalization here scales your whole spectrum and is invisible until it shows up as wrong `Hs`.
+
+Donelan-Banner is a refinement; add it behind the `model` flag later.
+
+### 1.3 The frequency → wavenumber conversion
+
+This is where implementations most often go wrong. From the primer §2:
+
+```
+S(k, θ) = S(f) · D(f, θ) · Cg / (2π k)
+```
+
+The `Cg/(2πk)` is the Jacobian `df/dk` divided by `k` (from `d²k = k dk dθ`). Derive it explicitly in a comment in the code — future-you will want to check it.
+
+```python
+def jonswap_sk(kx, ky, U10, fetch, theta_wind, depth=None, gamma=3.3):
+    """
+    2-D wavenumber spectrum S(kx, ky) [m^4].
+    Returns array matching kx/ky broadcast shape.
+    depth=None → deep water dispersion.
+    """
+```
+
+Handle `k = 0` (the DC bin) by setting `S = 0` explicitly.
+
+Include the depth-dependent dispersion from the start — `ω² = gk·tanh(kd)` with `d = None` meaning deep. You need it in Phase 5 and it's much easier to build in now than to retrofit.
+
+### 1.4 Moments
+
+```python
+def m0(S, kx, ky):          # height variance
+def m2(S, kx, ky):          # = total mean square slope
+def mss_above(k_cut, ...):  # ∫ k²S over |k| > k_cut  ← the LOD workhorse
+def mss_anisotropic(...):   # returns (mss_up, mss_cross)
+```
+
+`mss_above` is the function everything else calls. Make it accept a cutoff and return the slope variance above it. Because the Phillips tail integrates logarithmically (primer §"the punchline"), integrate on a **log-spaced radial grid** out to the capillary cutoff (`k ≈ 400 rad/m`), not on the FFT's linear grid — the linear grid truncates at its Nyquist and will systematically under-report.
+
+This is the point where the analytic spectrum and the discrete FFT grid part ways, and that's intentional: the FFT grid gives you geometry, the analytic integral gives you the sub-mesh statistics the geometry is missing.
+
+### 1.5 Cross-check against Cox-Munk
+
+```python
+def cox_munk_mss(U12):
+    """Empirical mean square slope, Cox & Munk 1954 (clean surface)."""
+    return 0.003 + 0.00512 * U12
+
+def cox_munk_anisotropic(U12):
+    up    = 0.00316 * U12
+    cross = 0.003 + 0.00192 * U12
+    return up, cross
+```
+
+Compare `m2()` from your full spectrum (integrated to capillary cutoff) against `cox_munk_mss()`. Expect the same order of magnitude. Exact agreement isn't expected — Cox-Munk is an open-ocean long-fetch fit and will over-predict for a short-fetch freshwater body — but a factor of 10 means a normalization bug.
+
+### GATE 1
+
+- [ ] `4√(∫S df)` matches closed-form `Hs` within 2%
+- [ ] `f_p` from integration matches closed form within 2%
+- [ ] `∫D dθ = 1` within 1e-6 for all `f`
+- [ ] `∫S(k)d²k = ∫S(f)df` within 1% (the Jacobian check — **this is the important one**)
+- [ ] `m2` within a factor of ~3 of Cox-Munk at the same wind speed
+- [ ] `mss_above(0)` equals `m2`, and `mss_above(k)` decreases monotonically
+
+Record the actual numbers in `docs/validation_report.md`. That file is your V&V artifact and it should grow at every gate.
+
+---
+
+## PHASE 2 — FFT surface synthesis
+
+**Deliverable:** `pywave/surface.py`, `pywave/tiling.py`
+**Estimate:** 1 week
+**Depends on:** Phase 1
+
+### 2.1 Grid setup
+
+For a tile of size `L` with `N×N` samples:
+
+```
+dx = L / N
+kx = 2*pi * fftfreq(N, d=dx)      # rad/m, includes negatives
+ky = 2*pi * fftfreq(N, d=dx)
+KX, KY = meshgrid(kx, ky, indexing='xy')
+K = hypot(KX, KY)
+dk = 2*pi / L                     # spacing in both kx and ky
+```
+
+### 2.2 Initial amplitudes
+
+```python
+def initial_amplitudes(S, dk, seed):
+    rng = np.random.default_rng(seed)
+    xi_r = rng.standard_normal(S.shape)
+    xi_i = rng.standard_normal(S.shape)
+    return 0.5 * (xi_r + 1j*xi_i) * np.sqrt(S * dk * dk)
+```
+
+**On the factor of 0.5.** Conventions in the literature differ and this is a notorious trap. With this form, `E|h̃₀|² = ½·S·Δk²`, and after the two-term time evolution (which sums two independent contributions) you get `E|h̃|² = S·Δk²`, so `Σ_k E|h̃|² = m₀` as required. Tessendorf's written formula uses `1/√2` because he folds a factor of 2 into his definition of `P_h`. **Don't reason about this — let Gate 2 pin it.** If `Hs` comes out √2 too large, this is why.
+
+Use `default_rng` with an explicit seed, never the legacy global RNG, and never `np.random.seed`. Reproducibility across machines depends on it.
+
+### 2.3 Time evolution and the surface
+
+```python
+def surface_at(h0, K, omega, t, N):
+    """Return (h, dx_disp, dy_disp, slope_x, slope_y) at time t."""
+    ht = h0 * np.exp(1j*omega*t) + np.conj(flip_k(h0)) * np.exp(-1j*omega*t)
+    h  = np.real(np.fft.ifft2(ht) * N*N)
+    ...
+```
+
+`flip_k(h0)` must implement `h̃₀(−k)`. On an FFT grid that's `np.roll(h0[::-1, ::-1], shift=1, axis=(0,1))` — the roll is needed because `fftfreq` puts DC at index 0, not at the centre. **Get this wrong and you get a complex-valued surface**; assert `np.max(np.abs(np.imag(...))) < 1e-9` in a test.
+
+Horizontal displacement and slopes, in the same pass:
+
+```
+Dx̃ = -1j * (KX/K) * ht        →  ifft → dx_disp
+Dỹ = -1j * (KY/K) * ht        →  ifft → dy_disp
+Sx̃ =  1j * KX * ht            →  ifft → slope_x
+Sỹ =  1j * KY * ht            →  ifft → slope_y
+```
+
+Guard `K = 0`. Five inverse FFTs per frame at 512² is a few milliseconds — no need to optimize.
+
+**Do not implement Tessendorf's `ω` quantization for looping.** It introduces a detectable period, which is poison both for training-set diversity and for closed-loop temporal analysis.
+
+### 2.4 Tiling
+
+Single-tile output is exactly periodic and the repetition is very visible in glint. Compose three tiles with incommensurate sizes, each carrying a disjoint band of the spectrum (the `band` fractions in the config are fractions of the radial wavenumber range):
+
+```python
+def composite_surface(tiles, x, y, t):
+    """Sum tiles, each sampled at (x,y) mod its own size, with its own rotation."""
+```
+
+Each tile gets:
+- its own size and `N` (so its own resolvable band)
+- its own rotation applied to the sampling coordinates
+- a band-limiting mask on `S` so bands don't double-count
+
+The band-limiting is what makes summing valid: because the bands are disjoint, variances add and the composite still integrates to `m₀`. **Verify this** — it's Gate 2's tiling check, and it's easy to get wrong by leaving overlap between bands.
+
+### 2.5 Anisotropy channel
+
+Compute per-tile `mss_up`, `mss_cross` from the spectrum and the local wave direction. Away from shore these are constant; Phase 5 will make them spatially varying. Provide them now so the downstream contract doesn't change later.
+
+### GATE 2
+
+- [ ] Surface is real: `max|imag| < 1e-9`
+- [ ] `4·std(h)` matches JONSWAP `Hs` within 5% (single tile, large grid)
+- [ ] Composite of three tiles also matches `Hs` within 5%
+- [ ] Zero-crossing period from a time series matches `Tz = 2π√(m₀/m₂)` within 10%
+- [ ] `mean(slope_x² + slope_y²)` matches `mss_above(0) − mss_above(k_nyquist)` within 10%
+- [ ] Histogram of `h` is near-Gaussian; skewness in `[0, 0.3]` with choppiness on
+- [ ] Jacobian determinant of displacement map has no negative values at `choppiness = 1.0`
+- [ ] Crest tracked across frames moves at `c = ω/k` within 5%
+- [ ] Same seed + same `t` on two machines → identical to 1e-12
+
+---
+
+## PHASE 3 — Validation suite
+
+**Deliverable:** `tests/`, `docs/validation_report.md`
+**Estimate:** 3 days
+**Depends on:** Phases 1–2
+
+Formalize the Gate 1 and Gate 2 checks as pytest tests. They're not just CI hygiene — this suite *is* the traceability argument, and it's the thing you can show in a review that you fundamentally could not produce for a DCC tool's black-box ocean solver.
+
+Structure each test to emit its numbers into `validation_report.md`, not just pass/fail. A reviewer wants to see "realized Hs = 0.0812 m vs. theoretical 0.0798 m, +1.8%", not a green checkmark.
+
+Add a **regression baseline**: pickle a small reference surface at a fixed seed and `t`, and test against it. This catches accidental convention changes during later refactoring, which is otherwise nearly undetectable.
+
+### GATE 3
+
+- [ ] All Gate 1 and Gate 2 checks automated in pytest
+- [ ] `pytest` runs clean in under 60 s
+- [ ] `validation_report.md` auto-generated with actual values
+- [ ] Regression baseline committed
+- [ ] `git_sha` recorded in the report header
+
+---
+
+## PHASE 4 — Terrain and lake basin in Houdini
+
+**Deliverable:** `houdini/build_terrain.hip`, `houdini/export_fields.py`, the six field files from §0.4
+**Estimate:** 1 week
+**Depends on:** nothing (can run parallel with 1–3)
+
+### 4.1 Base terrain
+
+- **HF Grid**: 1024 × 1024, size 1000 × 1000 m → 0.977 m posts. Round to 1024 m domain for exactly 1 m posts; simpler and the extra 24 m costs nothing.
+- **HF Noise**: low frequency, amplitude 10–20 m over the domain. This is regional relief, not the lake.
+- Set `z_w = 100.0` m as a scene constant.
+
+### 4.2 Carve the basin
+
+Do **not** model the lake as a surface. Carve terrain and let water level define the lake.
+
+1. Draw a closed curve in plan view — the approximate lake outline. Rough is fine; steps 4.3–4.4 make it real.
+2. Rasterize to a mask (HF Mask by Feature, or a rasterized curve SOP).
+3. Blur the mask (~20 m) to get a soft radial falloff.
+4. `height -= mask * d_max` with `d_max` = 5–8 m.
+5. Ensure the rim is above `z_w` all the way around.
+
+**Sanity check:** flood-fill from the deepest cell at `z_w`. You should get one connected basin, no leaks. A leak here produces bizarre results four phases later.
+
+### 4.3 Shoreline complexity — perturb terrain, not the outline
+
+The key move (primer §"shoreline complexity"): perturbing the *outline curve* gives you a wiggly line. Perturbing the *terrain* near the waterline gives you a fractal contour plus islands, shoals, and spits for free, wherever noise amplitude exceeds local depth.
+
+Three noise bands, masked to `|s| < 60 m`:
+
+| Band | Wavelength | Amplitude | Produces |
+|---|---|---|---|
+| Low | 100–300 m | 1–2 m | bays, headlands |
+| Mid | 10–40 m | 0.5 m | coves, points |
+| High | 1–5 m | 0.1 m | crenulation |
+
+**Make amplitude slope-dependent.** Compute terrain slope, then scale noise amplitude *inversely*: steep banks get suppressed noise (straight, sharp, rocky edges), shallow banks get amplified noise (sinuous, braided, mudflat edges). This is physically right — wave energy reworks gentle shores far more than resistant steep ones — and it gives you two visually distinct shoreline regimes in one test scene, which is exactly what you want for material development.
+
+Follow with one hydraulic erosion pass with water level set. Gullies and small deltas feeding the lake are cheap here and add a lot of realism.
+
+### 4.4 The equilibrium beach profile
+
+"Smoothing" the shoreline with a blur is wrong — it destroys §4.3's detail and gives a linear ramp that reads as artificial. Real beaches are concave-up, following roughly Dean's profile:
+
+```
+h(y) = A * y**(2/3)        y = distance offshore, A from sediment grain size
+```
+
+Implementation: in a band around the contour, blend the noisy terrain toward the Dean profile, weighted by `|s|`:
+
+```
+w = smoothstep(|s| / band_width)
+z = w * z_noisy + (1-w) * z_dean
+```
+
+Choose `A` per-segment from the local bank slope so steep shores keep a short steep profile and shallow shores get a long gentle one.
+
+**Terracing warning.** At 1 m posts with a 1% shoreline slope, a 1 cm water-level change moves the waterline a full metre laterally, and the contour quantizes into visible staircases. If you want convincing mudflats, refine locally to 0.25 m posts inside `|s| < 20 m`. Budget for this — it's the most likely thing to force a rework of Phase 4.
+
+### 4.5 Derived fields
+
+Compute once, in Houdini, and export:
+
+- **depth** = `z_w − z` (positive in water)
+- **sdf** = signed distance to the `z = z_w` contour. Extract the contour as a curve, then use an exact Euclidean distance transform (`scipy.ndimage.distance_transform_edt` on the binary water mask, differenced for inside/outside) rather than Houdini's approximate SDF — you need accuracy here because Phase 5 differentiates it.
+- **shore_normal** = `∇s / |∇s|`, unit vector pointing inland. Smooth `s` slightly before differentiating; raw EDT is noisy at the pixel level and the noise propagates straight into refraction direction.
+- **bottom_type** = classify from depth, slope, and proximity: rock / sand / mud / vegetated. Drives EO bottom reflectance and Hotts thermal properties.
+
+### 4.6 Export
+
+`export_fields.py` runs inside Houdini, converts Y-up → Z-up **here and only here**, and writes the six files plus `grid_meta.json`.
+
+Write an independent loader in `pywave` that reads them and asserts:
+- shapes match `grid_meta`
+- `depth = z_w − terrain_z` exactly
+- `sign(sdf) == -sign(depth)` everywhere (the §0.3 sign convention)
+- `|shore_normal| = 1` within 1e-6 in the near-shore band
+
+### GATE 4
+
+- [ ] Single connected basin, no rim leaks
+- [ ] Shoreline shows detail at all three noise scales
+- [ ] Steep and shallow bank regions both present and visibly different
+- [ ] At least one island or shoal emerged from the noise (evidence §4.3 is working as intended)
+- [ ] Beach profile concave-up, not linear — plot a transect and check
+- [ ] No visible terracing at the waterline
+- [ ] All six fields load and pass the assertion set
+- [ ] Round-trip a known point: Houdini world position → exported grid index → same position
+
+---
+
+## PHASE 5 — Nearshore transformation
+
+**Deliverable:** `pywave/nearshore.py`, `pywave/foam.py`
+**Estimate:** 1.5 weeks
+**Depends on:** Phases 2, 4
+
+### 5.1 Scope — read this before writing code
+
+Run the numbers first, because they tell you how little you need to build:
+
+```
+Hs = 0.08 m,  Tp = 1.05 s,  λp = 1.7 m
+deep-water cutoff = λ/2 = 0.85 m
+```
+
+The lake is 5 m deep. **It is deep water everywhere except the last few metres.** Consequences:
+
+- Breaking at `H = 0.78d` → breaks in ~10 cm of water
+- On a 5% slope, surf zone ≈ **2 m wide**
+- Iribarren `ξ ≈ 0.23` → **spilling** breakers, no plunging
+- Runup ≈ 2 cm vertical → swash excursion **0.3–0.5 m horizontal**
+- Whitecap coverage at 5 m/s ≈ **0.1%** — negligible, don't build open-water foam
+
+At 1 m GSD the entire surf and swash zone is **sub-pixel**. So: model shoaling and refraction as geometry (they act over tens of metres and are resolved), model breaking and swash as **channels** (sub-pixel). Building animated swash geometry would be weeks of work invisible at your sensor resolution.
+
+### 5.2 Shoaling
+
+```python
+def shoaling_coefficient(omega, depth, g=9.81):
+    """Ks = sqrt(Cg_deep / Cg_local), solving dispersion at local depth."""
+```
+
+Solve `ω² = gk·tanh(kd)` for `k` at each cell — Newton iteration from the deep-water guess `k₀ = ω²/g` converges in 3–4 steps. Then:
+
+```
+n  = 0.5 * (1 + 2*k*d / sinh(2*k*d))
+Cg = n * omega / k
+Ks = sqrt(Cg_deep / Cg)
+```
+
+Apply as an amplitude scale on the composite surface. Because it's frequency-dependent, apply per spectral band (i.e. per tile) rather than as a single scalar — this is a good reason the tiles carry disjoint bands.
+
+### 5.3 Refraction
+
+Snell: `sin θ / c = const`. Practically, blend wave direction toward the shore normal as depth drops:
+
+```
+w = clamp(1 - d/d_ref, 0, 1)          # d_ref ≈ 3*λp
+theta = slerp(theta_deep, theta_shore_normal, w)
+```
+
+`theta_shore_normal` comes from `shore_normal.npy`. Waves should arrive nearly shore-parallel regardless of wind — if your render shows waves hitting the beach at 40°, refraction is broken.
+
+Because the FFT is translation-invariant and refraction isn't, this is applied as a per-cell post-process on the composite, not inside the FFT. **Document it as an approximation.** At 8 cm wave heights it's well within defensible; a full mild-slope or Boussinesq solver is a much larger project and unnecessary here.
+
+### 5.4 Breaking and wetness
+
+```python
+def breaking_mask(H_local, depth, gamma_b=0.78):
+    return H_local > gamma_b * depth
+```
+
+Wetness fraction — the sub-pixel swash representation:
+
+```
+R = xi * Hs                            # Hunt runup, vertical
+swash_band = R / local_slope           # horizontal extent
+wetness = smoothstep over sdf within swash_band, phase-modulated at Tp
+```
+
+`wetness` drives: EO albedo (wet sand is darker), LWIR emissivity (slightly higher), and critically the **thermal channel** — wet soil has much higher thermal inertia and reads as a cold line in daytime LWIR. That capillary-fringe line is one of the most diagnostic features in a littoral LWIR image and it comes entirely from Hotts, not from the renderer.
+
+### 5.5 Foam
+
+Seed where `breaking_mask` is true, then advect and decay:
+
+```
+foam[t+dt] = foam[t] * exp(-dt * ln2 / halflife)
+             + seed_rate * breaking_mask
+foam advected shoreward at Cg
+```
+
+Confine to the ~2 m surf band. Foam is optically very different from water: high albedo in EO, and near-blackbody in LWIR (`ε ≈ 0.95–0.98`) versus water's angular falloff. Even sub-pixel, the fractional coverage matters radiometrically, which is why it's a channel rather than being ignored.
+
+**Note this breaks pure statelessness** — foam is the one field with frame-to-frame memory. Handle it by either (a) keeping foam state in the frame generator and accepting sequential generation, or (b) spinning up foam from a fixed number of preceding frames when generating any frame in parallel. Option (b) preserves the "any node, any frame" property; with a 3 s half-life, 30 frames of spin-up is plenty. **Recommend (b)** — it's worth the small cost to keep the reproducibility guarantee intact.
+
+### GATE 5
+
+- [ ] Wave height grows shoreward, matching analytic `Ks` on a test transect within 10%
+- [ ] Wave crests become shore-parallel regardless of wind direction
+- [ ] Breaking occurs at `d ≈ H/0.78`, surf zone ≈ 2 m wide
+- [ ] Foam appears only in the surf band, decays with the configured half-life
+- [ ] Wetness band width matches the Hunt runup calculation
+- [ ] No discontinuities at the deep/shallow transition — plot a transect of `Ks`
+- [ ] Foam spin-up: frame 500 generated cold vs. sequentially → identical within 1%
+
+---
+
+## PHASE 6 — Mesh generation and export
+
+**Deliverable:** `pywave/mesh.py`, `pywave/channels.py`, `pywave/export.py`
+**Estimate:** 1 week
+**Depends on:** Phases 2, 4, 5
+
+### 6.1 Water extent
+
+Mesh only where `depth > 0`, plus a small margin past the waterline so swash has somewhere to live. Extract the water mask from `depth`, dilate a few cells, and triangulate.
+
+Trim at `depth < 0.02 m` rather than at exactly zero — the near-zero band is where the mesh gets slivery and where you'd get z-fighting against terrain.
+
+### 6.2 LOD rings
+
+From config: concentric rings by distance from camera, each with its own post spacing. Stitch ring boundaries with a transition row of triangles — or simply overlap slightly and let depth sorting handle it, which is fine at these wave heights.
+
+### 6.3 Displacement
+
+For each vertex at rest position `(x, y)`:
+
+```
+h, dx_disp, dy_disp, sx, sy = composite_surface(tiles, x, y, t)
+h *= Ks(x,y)                          # shoaling
+pos = (x + chop*dx_disp, y + chop*dy_disp, z_w + h)
+n   = normalize((-sx, -sy, 1))
+```
+
+Use the **analytic** slopes for normals. Do not compute normals from the mesh — mesh normals are a finite-difference approximation of a field you already have exactly, and they lose exactly the high-frequency content that matters most radiometrically.
+
+### 6.4 The LOD invariant — enforce this in code
+
+```
+mss_mesh(LOD) + mss_bsdf(LOD) = mss_total       (constant across LOD)
+```
+
+So per vertex:
+
+```python
+k_nyq = pi / lod_dx                    # this vertex's LOD
+mss = mss_above(k_nyq)                 # from Phase 1
+```
+
+Write it as an assertion, not a comment:
+
+```python
+assert abs(mss_resolved(lod_dx) + mss_above(pi/lod_dx) - mss_total) < 0.01*mss_total
+```
+
+Skipping this produces the classic failure: distant water goes mirror-smooth because its roughness was baked at the fine LOD. It's recognizable once you know it, and mystifying if you don't.
+
+### 6.5 Channel packing
+
+Fill every per-vertex property in the §0.4 contract. Watch that `wdir` comes from the *refracted* local direction (Phase 5), not global wind — nearshore anisotropy should follow the local waves.
+
+### 6.6 Export
+
+Binary PLY with custom float properties. Mitsuba's PLY loader passes unknown per-vertex properties through as mesh attributes, accessible in a custom BSDF as `mesh_attribute` textures. Verify this early with a trivial test mesh — it's a five-minute check that de-risks Phase 7.
+
+Sidecar JSON per frame: `t`, wind, seed, `git_sha`, LOD config. Provenance for every frame, which matters when a signature question surfaces six months later.
+
+### GATE 6
+
+- [ ] Mesh covers exactly the water region, no gaps or overshoot at the shoreline
+- [ ] No z-fighting with terrain anywhere along the waterline
+- [ ] Analytic normals match finite-difference normals within a few degrees (sanity, not equality — they *should* differ slightly)
+- [ ] LOD invariant assertion passes at every ring
+- [ ] Visual check: no seam artifacts at LOD boundaries
+- [ ] Custom PLY properties survive a round-trip through Mitsuba's loader
+- [ ] Frame at `t` regenerated on a different machine → bit-identical mesh
+
+---
+
+## PHASE 7 — Mitsuba BSDF plugin
+
+**Deliverable:** `mitsuba/roughwater.cpp`
+**Estimate:** 2 weeks
+**Depends on:** Phase 6
+
+### 7.1 Why a custom plugin
+
+Mitsuba's `roughdielectric` assumes real IOR. Water at 10 µm has `n = 1.22, k = 0.051` — the imaginary part is not optional, it's what makes the water opaque in LWIR. `roughconductor` takes complex IOR but has no transmission, which you need for EO bottom visibility.
+
+You need one plugin that switches behavior by band: complex-IOR opaque reflector in MWIR/LWIR, dielectric with transmission in EO. Same NDF, same roughness, same geometry — different Fresnel.
+
+### 7.2 Structure
+
+```cpp
+class RoughWater : public BSDF {
+    // Parameters:
+    //   mss          : mesh_attribute texture (sub-mesh slope variance)
+    //   aniso        : mesh_attribute (crosswind/upwind ratio)
+    //   wdir         : mesh_attribute (2-vector, tangent frame)
+    //   foam         : mesh_attribute
+    //   depth        : mesh_attribute
+    //   ior_table    : spectral n(λ), k(λ) from Hale & Querry
+    //   mode         : reflect_only | dielectric
+};
+```
+
+### 7.3 NDF — Beckmann, and the alpha mapping
+
+**Use Beckmann, not GGX.** Beckmann's NDF is exactly a Gaussian slope distribution, which is what Cox-Munk measured and what your spectral integral produces. GGX's heavy tail is an empirical fit for machined surfaces with no physical basis for water, and it over-predicts off-specular glint — which in LWIR reads as spurious warm returns and inflated false-alarm rates.
+
+The mapping, being explicit because a stray √2 here is the most likely single bug in the whole plugin:
+
+Beckmann's slope distribution is `P(s) = exp(−(sx²+sy²)/α²) / (πα²)`, a Gaussian with **per-axis variance `α²/2`**. Total mean square slope is the sum over both axes:
+
+```
+mss_total = 2 * (alpha^2 / 2) = alpha^2
+
+therefore    alpha = sqrt(mss)
+```
+
+Anisotropic:
+
+```
+alpha_u = sqrt(2 * mss_up)
+alpha_v = sqrt(2 * mss_cross)
+```
+
+Unit-test this by sampling the NDF and measuring the realized slope variance against the input `mss`.
+
+### 7.4 The tangent frame — a real trap
+
+`alpha_u`/`alpha_v` are defined in the **tangent frame**, which Mitsuba derives from UV parameterization. On a displaced water mesh, UVs are arbitrary — so your anisotropy axis will rotate randomly across the surface, and nearshore it won't follow refraction at all.
+
+**Build the frame from the `wdir` mesh attribute inside the BSDF and ignore UV tangents entirely.** More code, but it removes a whole class of silent, hard-to-see errors.
+
+### 7.5 Fresnel
+
+- **EO** (`n = 1.333`, `k ≈ 0`): standard dielectric Fresnel, with transmission.
+- **MWIR/LWIR**: complex Fresnel. Mitsuba has `fresnel_conductor`; feed it `n + ik` from the spectral table.
+
+Load `n(λ)`, `k(λ)` from Hale & Querry (1973) as a spectral table — it covers 200 nm to 200 µm, so your whole range comes from one citable source.
+
+### 7.6 Shadowing-masking
+
+Height-correlated Smith, matched to Beckmann. At 60–80° incidence — typical for an oblique LWIR slant — this term dominates, and uncorrelated Smith loses a few percent, which is visible against microbolometer NEDT.
+
+### 7.7 Foam
+
+Blend toward a foam BSDF by coverage fraction:
+
+```
+f_total = (1 - foam) * f_water + foam * f_foam
+```
+
+Foam is near-Lambertian, high albedo in EO, `ε ≈ 0.95–0.98` in LWIR (near-blackbody, and notably *warmer-looking* than the surrounding water, which is mostly reflecting cold sky).
+
+### 7.8 EO bottom visibility
+
+For `mode = dielectric`, attenuate transmitted radiance through the water column:
+
+```
+T = exp(-c * (path_length))            # c ≈ 1-3 m^-1 turbid lake
+```
+
+Use the `depth` attribute for the vertical path; approximate the slant path by `depth / cos θ_t`. A proper participating medium is more correct but much slower, and at these depths the difference is small. Note it as an approximation.
+
+### 7.9 Build and register
+
+Build against your Mitsuba 3.6 tree. Register the plugin, then test in isolation before touching the full scene:
+
+- flat plane, `mss = 0` → should match analytic Fresnel exactly
+- flat plane, varying `mss` → glitter pattern widens smoothly
+- known sun angle → glitter pattern centroid matches specular geometry
+
+### GATE 7
+
+- [ ] Compiles clean against Mitsuba 3.6
+- [ ] White-furnace test: energy conservation within 1% for `mss` in [0, 0.1]
+- [ ] `mss = 0` reproduces analytic Fresnel to 1e-4
+- [ ] Realized slope variance from NDF sampling matches input `mss` within 2%
+- [ ] Anisotropy axis follows `wdir`, verified by rotating `wdir` and observing glitter elongation rotate with it
+- [ ] LWIR reflectance at normal incidence ≈ 0.0098 (from `n=1.22, k=0.051`)
+- [ ] Foam blend transitions smoothly, no banding
+- [ ] Renders without threading errors at production sample counts
+
+---
+
+## PHASE 8 — Emissivity
+
+**Deliverable:** `mitsuba/build_emissivity.py`, emissivity LUT
+**Estimate:** 1 week
+**Depends on:** Phase 7
+
+This is the part Mitsuba won't do for you, and it's the single most important radiometric quantity for your primary sensor.
+
+### 8.1 The problem
+
+In LWIR, water is opaque and self-emitting. You need directional emissivity from a **rough** surface:
+
+```
+eps(theta_v, mss, lambda) = 1 - rho_dh(theta_v, mss, lambda)
+```
+
+where `rho_dh` is directional-hemispherical reflectance — the BSDF integrated over the entire incident hemisphere. Mitsuba gives you BSDF evaluation and sampling, not that integral.
+
+### 8.2 Build the table
+
+```python
+for lam in spectral_bands:          # MWIR + LWIR sample points
+    for theta_v in linspace(0, 89, 90):
+        for mss in logspace(-4, -1, 20):
+            rho = integrate_hemisphere(roughwater_bsdf, theta_v, mss, lam)
+            eps[lam, theta_v, mss] = 1 - rho
+```
+
+Integrate with cosine-weighted hemisphere sampling, ~10⁴ samples per entry. Minutes to build the whole table.
+
+**Critically: use the same BSDF code as the renderer.** Either call the Mitsuba plugin through the Python bindings, or share the C++ evaluation. A separately-implemented integrator will drift from the renderer and the disagreement will be nearly impossible to find.
+
+### 8.3 What you should see
+
+Roughness **raises** emissivity at oblique angles relative to flat water — multiple facet orientations mean fewer rays strike at grazing incidence. At 70° view:
+
+```
+flat water:   eps ≈ 0.90
+mss = 0.03:   eps ≈ 0.93
+```
+
+At typical scene temperatures that's roughly a **1 K apparent temperature difference** — well above microbolometer NEDT. This is a real, measurable signature effect arising entirely from sub-grid roughness, and it's a good result to put in front of a customer as justification for the whole approach.
+
+### 8.4 Reflected sky
+
+Whatever isn't emitted is reflected — mostly sky. In LWIR, downwelling sky radiance is strongly angle-dependent: cold at zenith, much warmer near the horizon. Water in LWIR imagery often looks cold precisely because it mirrors zenith sky.
+
+Ensure Blaze's sky model provides angularly-resolved downwelling LWIR radiance, and that the water BSDF samples it properly. **Getting emissivity right and sky wrong produces the same magnitude of error as getting emissivity wrong.**
+
+### GATE 8
+
+- [ ] Table matches analytic flat-water emissivity at `mss → 0` within 1%
+- [ ] Emissivity increases with `mss` at oblique angles (the expected direction)
+- [ ] Nadir emissivity ≈ 0.98 in LWIR
+- [ ] Table integrated into the plugin, LUT interpolation smooth
+- [ ] Rendered flat water at nadir matches a hand calculation within 0.5 K
+
+---
+
+## PHASE 9 — EMBER integration
+
+**Deliverable:** Spark scene templates, Hotts coupling, NetCDF channel extensions
+**Estimate:** 1.5 weeks
+**Depends on:** all prior
+
+### 9.1 Terrain NetCDF channels
+
+Extend the terrain schema with continuous fields — **not discrete class masks**. Let Blaze do the BSDF mapping from continuous values; that's what keeps the material attribution decoupled from the geometry, which was the original point of this exercise.
+
+| Variable | Type | Purpose |
+|---|---|---|
+| `water_depth` | f32 | EO attenuation, breaking, Hotts |
+| `dist_to_shore` | f32 | signed; drives everything nearshore |
+| `wetness_fraction` | f32 | albedo + thermal inertia modulation |
+| `bottom_type` | u8 | EO bottom reflectance, Hotts substrate |
+| `foam_density` | f32 | per-frame, sequence-varying |
+
+### 9.2 Hotts coupling
+
+Two water-specific thermal effects, both real at microbolometer NEDT:
+
+**Skin effect.** Water skin temperature runs 0.1–0.5 K below bulk due to evaporative and radiative cooling. Implement as a thin-layer boundary condition on the water body, or as a parameterized offset driven by wind speed and net radiation. Even the parameterized version is worth having.
+
+**Capillary fringe.** Damp soil above the waterline has much higher thermal inertia than dry soil, so it reads as a distinct cold line in daytime LWIR and a warm one at night. Drive substrate thermal properties from `wetness_fraction`. On a littoral scene this is one of the most diagnostic features in the image — arguably more recognizable than the water surface itself.
+
+### 9.3 Spark scenario
+
+Water surface needs a per-frame mesh swap. Options:
+
+1. Pre-generate all frames, reference by index (simplest; good for training-set generation)
+2. Generate on demand via a callback (better for long closed-loop runs where you don't know the duration ahead of time)
+
+Given closed-loop runs of minutes at 30 fps — thousands of frames — option 2 is likely necessary. But because the surface is stateless in `t`, both work and you can start with option 1.
+
+### 9.4 Multi-band co-registration
+
+The registration guarantee: **one mesh, one `mss` channel, three sets of optical constants.**
+
+Bands differ through the complex IOR in the Fresnel term, not through the NDF. As established, the microfacet cutoff is set by mesh resolution, not sensor wavelength — water's physical roughness bottoms out around a millimetre, which is 2000× the LWIR wavelength, so all your bands are comfortably in the geometric-optics regime.
+
+Verify by rendering the same frame in EO, MWIR, LWIR and confirming that glint *geometry* is identical across bands even though *radiance* differs greatly. If glint positions shift between bands, something is band-dependent that shouldn't be.
+
+### 9.5 Performance
+
+At 30 fps for a 60 s closed-loop run: 1800 frames.
+
+| Stage | Est. cost/frame |
+|---|---|
+| FFT surface (3 tiles) | ~10 ms |
+| Nearshore transform | ~20 ms |
+| Mesh generation | ~200 ms |
+| PLY write | ~100 ms |
+| **Total** | **~330 ms** |
+
+≈ 10 minutes of surface generation for a 60 s scenario, fully parallelizable since frames are independent (modulo foam spin-up, §5.5). Render time will dominate by a wide margin.
+
+### GATE 9
+
+- [ ] Full scene renders in EO, MWIR, LWIR
+- [ ] Glint geometry identical across bands; radiance differs appropriately
+- [ ] Capillary fringe visible as a cold line in daytime LWIR
+- [ ] Water skin temperature offset present and correct sign
+- [ ] Bottom visible through shallow water in EO, invisible in LWIR
+- [ ] 60 s sequence renders without artifacts
+- [ ] No temporal flicker beyond expected physical glint sparkle
+
+---
+
+## PHASE 10 — Validation and documentation
+
+**Deliverable:** `docs/validation_report.md`, V&V package
+**Estimate:** 1 week
+
+### 10.1 Physical validation
+
+Consolidate everything from Gates 1–9 into a single report with:
+
+- realized vs. theoretical `Hs`, `Tp`, `Tz`
+- realized vs. Cox-Munk mean square slope
+- emissivity vs. published flat-water values
+- shoaling coefficient vs. analytic
+- breaker depth vs. `H/γ_b`
+
+### 10.2 Traceability
+
+For each model component, state: the governing equation, the source citation, the parameter values used, and the validation result. This is the document that answers "why should we believe this imagery?" — and it's the deliverable you fundamentally could not produce for a DCC tool's undocumented ocean solver. That's worth stating explicitly in the report's introduction.
+
+### 10.3 Known limitations — write these down
+
+Being explicit about approximations is a strength in a V&V package, not a weakness. Reviewers trust documented limitations far more than silence.
+
+- Refraction/shoaling applied as post-process, not a full mild-slope solver
+- Gaussian slope distribution (Beckmann); Gram-Charlier skewness and kurtosis corrections not implemented — affects off-specular glint tails, which is the false-alarm regime
+- Cox-Munk coefficients are open-ocean fits; freshwater short-fetch calibration outstanding
+- EO bottom attenuation approximated by slant-path Beer-Lambert, not a participating medium
+- Multiple facet scattering neglected (~1% at operational `mss`, below NEDT — checked, not assumed)
+- Whitecaps not modeled (0.1% coverage at 5 m/s)
+
+### 10.4 The remaining calibration item
+
+The genuinely open empirical question is the Cox-Munk relation for freshwater at short fetch. That's a measurement problem, not a modeling one. If you can get field data — even a handheld radiometer and an anemometer at a local lake — that closes the largest remaining gap in the chain.
+
+---
+
+## Schedule
+
+| Phase | Weeks | Parallel with |
+|---|---|---|
+| 1. Spectrum | 1.0 | 4 |
+| 2. FFT surface | 1.0 | 4 |
+| 3. Validation suite | 0.5 | 4 |
+| 4. Houdini terrain | 1.0 | 1–3 |
+| 5. Nearshore | 1.5 | — |
+| 6. Mesh export | 1.0 | 7 (start) |
+| 7. Mitsuba BSDF | 2.0 | 6 |
+| 8. Emissivity | 1.0 | — |
+| 9. EMBER integration | 1.5 | — |
+| 10. Validation/docs | 1.0 | — |
+
+**Critical path ≈ 9 weeks.** Phases 1–4 parallelize, saving ~2 weeks with two people.
+
+**Highest-risk items:**
+1. **Mitsuba plugin (Phase 7)** — 2 weeks assumes familiarity with Mitsuba's plugin API. Add a week if not. De-risk early by verifying the custom-PLY-attribute path in Phase 6.
+2. **Terracing at the shoreline (Phase 4)** — may force local mesh refinement and a partial rework.
+3. **Spectrum normalization (Phase 1)** — the Jacobian is fiddly. Gate 1 catches it, which is exactly why Gate 1 exists.
+
+---
+
+## Quick reference — the test lake
+
+```
+Domain          1024 x 1024 m, 1 m posts
+Water level     z_w = 100 m
+Max depth       5-8 m
+Wind            5 m/s, fetch 1000 m
+Hs              0.08 m
+Tp              1.05 s
+lambda_p        1.7 m
+mss (total)     ~0.029  (RMS slope ~10 deg)
+Surf zone       ~2 m wide
+Swash           0.3-0.5 m horizontal
+Breaker type    spilling (xi ~ 0.23)
+Whitecaps       ~0.1% (negligible)
+Water mesh      0.125 m near field
+mss above mesh  ~60% of total
+```
+
+## Key equations
+
+```
+Dispersion        omega^2 = g k tanh(k d)
+Group velocity    Cg = n omega/k,  n = 0.5(1 + 2kd/sinh 2kd)
+JONSWAP           S(f) = alpha g^2 (2pi)^-4 f^-5 exp[-1.25(fp/f)^4] gamma^r
+f to k            S(k,th) = S(f) D(f,th) Cg / (2 pi k)
+Significant hgt   Hs = 4 sqrt(m0)
+Mean sq slope     mss = m2 = int k^2 S(k) d2k
+Beckmann alpha    alpha = sqrt(mss)
+Shoaling          Ks = sqrt(Cg_deep / Cg_local)
+Breaking          H_b = 0.78 d
+Iribarren         xi = tan(beta) / sqrt(H/L0)
+Runup             R = xi Hs
+Emissivity        eps = 1 - rho_dh(theta, mss)
+LOD invariant     mss_mesh(LOD) + mss_bsdf(LOD) = mss_total
+```
