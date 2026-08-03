@@ -11,7 +11,12 @@ venv/
 
 # Generated artifacts that are NOT the V&V record
 # (docs/validation_report.md IS committed -- it is the V&V artifact)
-docs/figures/
+#
+# docs/figures/*.png IS committed: the gallery is how the work gets explained to
+# people who will not run the code, which only works if GitHub can render it.
+# Everything else dropped in that directory stays local.
+docs/figures/*
+!docs/figures/*.png
 *.ply
 *.npy
 !tests/baseline/*.npy

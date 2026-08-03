@@ -4,12 +4,12 @@
 
 | | |
 |---|---|
-| generated | 2026-08-03 05:33:37 UTC |
-| git_sha | `ea87caeb0b82dc093ddfdf226f11216bc0cedf74 (working tree dirty)` |
+| generated | 2026-08-03 12:20:34 UTC |
+| git_sha | `095a802411d24bcf29a4a3099113316961070b98 (working tree dirty)` |
 | scene | `configs/test_lake.yaml` |
 | python | 3.14.5 (Windows AMD64) |
 | numpy / scipy | 2.5.1 / 1.18.0 |
-| checks recorded | 58 |
+| checks recorded | 93 |
 | exit status | PASS |
 
 Every number below was measured by the test suite against the implementation in this commit. Tolerances are the gate criteria from `littoral-water-implementation-cookbook.md`, except where a deviation is recorded in [Gate deviations](#gate-deviations).
@@ -133,6 +133,77 @@ Notes:
 - **tile baseline sha256 match** -- Bitwise on this platform; the 1e-12 tolerance above is what portability actually requires.
 - **max |difference| vs committed composite baseline** -- 1024 fixed world points, all five fields (h, dx_disp, dy_disp, slope_x, slope_y).
 
+## Gate 5 -- nearshore transformation
+
+| Check | Measured | Reference | Rel. error | Tolerance | Result |
+|---|---|---|---|---|---|
+| depth == z_w - terrain_z (max residual) | 7.1054e-15 m | 0 m | -- | 1.0e-12 | PASS |
+| cells where sign(sdf) != -sign(depth) | 0 | 0 | -- | 0.0e+00 | PASS |
+| max ||shore_normal| - 1| in the nearshore band | 0 | 0 | -- | 1.0e-06 | PASS |
+| shore_normal points inland (fraction of cells) | 1 | 1 | 0.00e+00 | 1.0e-02 | PASS |
+| shore normal angular spread, cosine embayment | 67.6979 deg | -- | -- | -- | PASS |
+| Dean A used | 0.1 m^1/3 | -- | -- | -- | PASS |
+| Dean A from D50 = 0.25 mm | 0.107952 m^1/3 | 0.1 m^1/3 | 7.95e-02 | 1.0e-01 | PASS |
+| foreshore slope at 10 cm depth | 0.066667 | -- | -- | -- | PASS |
+| Green's law ratio Ks(d)/Ks(2d) | 1.1859 | 1.1892 | 2.76e-03 | 2.0e-02 | PASS |
+| min Ks | 0.912993 | 0.913 | 7.46e-06 | 1.0e-02 | PASS |
+| kd at min Ks | 1.1998 | 1.2 | 1.51e-04 | 1.0e-01 | PASS |
+| Ks in deep water (d = 50 m) | 1 | 1 | 0.00e+00 | 1.0e-03 | PASS |
+| max relative step in Ks between adjacent samples | 3.5578e-04 | 0 | -- | 5.0e-03 | PASS |
+| per-tile representative omega | [6.358, 10.038, 14.448] | -- | -- | -- | PASS |
+| relative spread of sin(alpha)/c along a transect | 2.5620e-16 | 0 | -- | 1.0e-12 | PASS |
+| worst residual incidence angle at the waterline | 22.276 deg | 0 deg | -- | 2.5e+01 | PASS |
+| Kr range over the transect (45 deg incidence) | 0.8651 .. 1.0000 | -- | -- | -- | PASS |
+| max |Snell - blend| wave direction | 38.5013 deg | -- | -- | -- | PASS |
+| depth at the outer breaker | 0.099826 m | 0.099826 m | 1.39e-16 | 5.0e-02 | PASS |
+| Hs / (gamma_b * d) inside the surf zone | 1 | 1 | 0.00e+00 | 1.0e-06 | PASS |
+| surf zone width | 0.9 m | -- | -- | -- | PASS |
+| deep-water wavelength L0 | 1.7054 m | 1.7054 m | 1.30e-16 | 2.0e-02 | PASS |
+| Iribarren number xi | 0.298063 | -- | -- | -- | PASS |
+| Hunt runup R = xi * Hs | 0.025429 m | -- | -- | -- | PASS |
+| swash excursion R / tan(beta) | 0.381431 m | -- | -- | -- | PASS |
+| closed-form wetness vs sampled hard-waterline duty cycle | 4.9824e-05 | 0 | -- | 5.0e-03 | PASS |
+| wetness at mid-swash | 0.5 | 0.5 | 0.00e+00 | 1.0e-09 | PASS |
+| realised 4 std(h) vs predicted Hs_local (worst) | 0.077646 | 0 | -- | 1.0e-01 | PASS |
+| max |h_nearshore - h_deep| at d = 4.9 m | 2.7756e-17 m | 0 m | -- | 1.0e-03 | PASS |
+| foam remaining after one half life | 0.5 | 0.5 | 0.00e+00 | 1.0e-09 | PASS |
+| equilibrium foam coverage in a breaking cell | 0.890858 | 0.890858 | 9.24e-11 | 1.0e-06 | PASS |
+| max |sdf| where foam coverage > 0.01 | 1.375 m | -- | -- | -- | PASS |
+| peak foam coverage | 0.266497 | -- | -- | -- | PASS |
+| cold vs sequential, worst per-cell relative error | 0.006144 | 0 | -- | 1.0e-02 | PASS |
+| spin-up steps for 0.5% residual at 30 fps | 688 | -- | -- | -- | PASS |
+
+Notes:
+
+- **cells where sign(sdf) != -sign(depth)** -- Evaluated further than 1 m from the waterline; both fields are discretised on the same grid, so within about a cell of the contour the signs may legitimately disagree.
+- **shore normal angular spread, cosine embayment** -- A straight beach would give 0. Curved contours are what make refraction focus energy on headlands.
+- **Dean A used** -- Medium sand. Tabulated classes: fine_sand 0.079, medium_sand 0.1, coarse_sand 0.125, gravel 0.2 m^1/3.
+- **foreshore slope at 10 cm depth** -- The Dean profile's slope diverges at the waterline, so the runup and Iribarren calculations evaluate it at the depth where these waves break.
+- **Green's law ratio Ks(d)/Ks(2d)** -- Evaluated at kd = [0.086, 0.122, 0.173], i.e. genuinely shallow. The asymptote is approached, not exact, at finite kd.
+- **max relative step in Ks between adjacent samples** -- 6000 log-spaced depths from 5 mm to 30 m.
+- **per-tile representative omega** -- Ks at d = 0.05 m: [1.1056, 0.9523, 0.9134] -- higher-frequency bands are still in deeper water relative to their own wavelength, so they shoal less.
+- **relative spread of sin(alpha)/c along a transect** -- 200 points from 0.06 m to 4.5 m depth, 45 deg deep-water incidence. Exact for the straight parallel contours of a planar Dean beach.
+- **worst residual incidence angle at the waterline** -- Wind directions 10-170 deg. 10 deg -> -80 deg incident, -22.3 deg at the waterline; 45 deg -> -45 deg incident, -15.8 deg at the waterline; 90 deg -> +0 deg incident, +0.0 deg at the waterline; 135 deg -> +45 deg incident, +15.8 deg at the waterline; 170 deg -> +80 deg incident, +22.3 deg at the waterline
+- **Kr range over the transect (45 deg incidence)** -- Bounded above by 1. Combined with a shoaling gain that peaks near 1.36, the two nearly cancel for obliquely incident waves on this beach.
+- **max |Snell - blend| wave direction** -- Mean 29.3 deg over the transect. The blend reaches full alignment by d = 3 lambda_p = 5.1 m, where Snell has barely started turning.
+- **depth at the outer breaker** -- Hs there = 0.0779 m, gamma_b = 0.78.
+- **Hs / (gamma_b * d) inside the surf zone** -- Exactly 1 by construction once the limiter engages -- this checks the limiter is applied, not bypassed.
+- **surf zone width** -- Cookbook 5.1 estimates ~2 m for a 5% slope; this beach is 6.7% at the break point, so a narrower zone is expected.
+- **deep-water wavelength L0** -- Equals lambda_p, since both are the deep-water wavelength at the peak period.
+- **Iribarren number xi** -- Breaker type: spilling. Cookbook 5.1 quotes xi ~ 0.23 for a 5% slope; this beach is steeper at 6.7%.
+- **Hunt runup R = xi * Hs** -- Cookbook 5.1 quotes ~2 cm vertical.
+- **swash excursion R / tan(beta)** -- Cookbook 5.1 quotes 0.3-0.5 m horizontal.
+- **closed-form wetness vs sampled hard-waterline duty cycle** -- 20000 samples over one period. The closed form is (1/pi) arccos(2s/W - 1); agreement is limited only by the sampling of the period.
+- **wetness at mid-swash** -- Exactly 1/2 by symmetry of the sinusoidal waterline.
+- **realised 4 std(h) vs predicted Hs_local (worst)** -- d = 0.29 m: 0.08536 vs 0.07921; d = 0.74 m: 0.07977 vs 0.08449; d = 1.17 m: 0.08577 vs 0.08526. Sampled across 4000 points at constant depth.
+- **max |h_nearshore - h_deep| at d = 4.9 m** -- Depth 5 m against a 1.7 m peak wavelength: kd = 17.9, comfortably deep, so Ks = Kr = 1 and the transform is the identity.
+- **foam remaining after one half life** -- Half life 3.0 s from config. After two half lives: 0.250000 (want 0.25).
+- **equilibrium foam coverage in a breaking cell** -- seed_rate = 0.2/s. Continuous-limit value is 0.8656, which is what to reason about when choosing seed_rate since it does not depend on the step size.
+- **max |sdf| where foam coverage > 0.01** -- Breaking itself extends to |sdf| = 0.88 m; foam is advected shoreward from there. Whitecaps over open water (~0.1% coverage at 5 m/s) are deliberately not modelled.
+- **peak foam coverage** -- Below the still-water equilibrium because advection continually sweeps foam out of the cells that seed it.
+- **cold vs sequential, worst per-cell relative error** -- Spin-up 92 steps = 23.0 s, initial-condition residual 0.0049. As a fraction of peak coverage the error is 0.121%. The cookbook's suggested 30 frames would leave 79% of the initial condition intact -- the window is set by the half life, not by a frame count.
+- **spin-up steps for 0.5% residual at 30 fps** -- = 22.9 s of simulated time. At the 0.25 s foam step the same window is 92 steps, which is why foam does not sub-step at the frame rate.
+
 ## Gate deviations
 
 Two cookbook gate criteria are not met, and cannot be met by a correct
@@ -183,3 +254,57 @@ tolerance (`|skew| < 0.05`, `|excess kurtosis| < 0.1`), which is what the
 amplitude draw and Hermitian symmetry actually predict, and record the displaced
 skewness as a reported quantity rather than a pass/fail bound. See
 `test_height_distribution_is_gaussian`.
+
+## Cookbook corrections
+
+Places where the implementation departs from the cookbook's *guidance* (as
+opposed to its gate criteria), with the measurement that motivated each.
+
+### Section 5.5: "with a 3 s half-life, 30 frames of spin-up is plenty"
+
+Wrong by more than an order of magnitude, and silently so -- a foam field spun
+up for 30 frames looks entirely plausible, it just is not reproducible.
+
+30 frames at 30 fps is **one second**. Against a 3 s half life that leaves
+`2^(-1/3)` = **79%** of the discarded initial condition still present. Measured
+cold-vs-sequential error at that setting is 2.2% per cell, against the 1% Gate 5
+asks for.
+
+The window is set by the half life, not by a frame count:
+`T_spin = t_half * log2(1/tol)`. For 0.5% that is 23 s -- 92 steps at the 0.25 s
+foam step, or 688 frames at 30 fps. `foam.spinup_steps()` computes it, and
+`foam.FoamModel.evaluate` calls it by default rather than accepting a frame
+count. Measured error at that setting: 0.61% per cell, 0.12% of peak coverage.
+
+Note also that the foam step need not be the frame step. Advection is
+semi-Lagrangian and unconditionally stable, so 0.25 s costs 6x less than 1/30 s
+for no visible difference.
+
+### Section 5.3: refraction by depth-weighted blend
+
+The cookbook prescribes blending the wave direction toward the shore normal with
+`w = clip(1 - d/d_ref, 0, 1)`, `d_ref ~ 3 lambda_p`. That is implemented as
+`nearshore.refraction_angle_blend`, but it is **not** the production path, for
+two reasons the tests measure:
+
+* It has no frequency dependence, so every spectral band would turn at the same
+  rate. Refraction is dispersive; the tiles carry disjoint bands precisely so
+  frequency-dependent effects can be applied per band.
+* It reaches full shore-normal alignment at the waterline regardless of the
+  incident angle, which Snell does not: at 80 degrees incidence the exact
+  answer is still 22 degrees off-normal at the break point.
+
+Production uses `nearshore.refraction_angle`, which solves Snell's law against
+the full dispersion relation. Measured disagreement between the two on a test
+transect: 38.5 degrees peak, 29.3 degrees mean. Snell's invariant `sin(a)/c` is
+conserved to 2.6e-16 across the transect, so the exact path costs nothing in
+accuracy and very little in time.
+
+### Section 5.1: "surf zone ~2 m wide"
+
+Not a deviation, a parameter difference, recorded so the numbers reconcile. The
+cookbook's 2 m assumes a 5% foreshore slope. The Dean profile used here
+(`A = 0.1`, medium sand) is 6.7% at the break point, giving a 0.9 m surf zone
+and `xi = 0.30` against the cookbook's 0.23. Both are firmly spilling, and the
+runup (2.5 cm) and swash excursion (0.38 m) land inside the cookbook's quoted
+ranges.

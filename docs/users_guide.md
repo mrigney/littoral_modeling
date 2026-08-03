@@ -2,9 +2,10 @@
 
 Spectral water surface synthesis for physics-based EO/IR littoral scene generation.
 
-This guide covers everything currently implemented: **Phase 1 (spectrum and moments)**
-and **Phase 2 (FFT surface synthesis and tiling)**. Phases 3+ are listed under
-[Roadmap](#12-roadmap) and are not yet written.
+This guide covers everything currently implemented: **Phase 1** (spectrum and
+moments), **Phase 2** (FFT surface synthesis and tiling), **Phase 3** (the
+validation suite), and **Phase 5** (nearshore transformation, built against a
+synthetic beach). Remaining phases are listed under [Roadmap](#12-roadmap).
 
 ---
 
@@ -23,6 +24,10 @@ and **Phase 2 (FFT surface synthesis and tiling)**. Phases 3+ are listed under
 11. [Where the physics comes from](#11-where-the-physics-comes-from)
 12. [Roadmap](#12-roadmap)
 13. [Validating a build](#13-validating-a-build)
+14. [The nearshore](#14-the-nearshore)
+
+> **In a hurry?** [gallery.md](gallery.md) explains the whole model in eight
+> figures.
 
 ---
 
@@ -53,11 +58,16 @@ independently.
 | Cox–Munk empirical cross-check | `moments.cox_munk_from_u10` |
 | A real surface `h(x, y, t)` with exact analytic slopes | `surface.WaveTile` |
 | Multi-tile composite that hides FFT periodicity | `tiling.TileSet` |
+| Synthetic beach with the Phase 4 field contract | `bathymetry.Bathymetry` |
+| Shoaling, Snell refraction, depth-limited breaking | `nearshore.transform` |
+| Swash wetness as a duty cycle, for the thermal channel | `nearshore.wetness_fraction` |
+| Foam with bounded, reproducible spin-up | `foam.FoamModel` |
 
 ### What it does not do yet
 
-No nearshore transformation (shoaling, refraction, breaking), no foam, no mesh
-export, no BSDF, no emissivity. See [Roadmap](#12-roadmap).
+No terrain import (Phase 4 — `bathymetry.py` supplies a synthetic stand-in), no
+mesh export, no BSDF, no emissivity, no EMBER integration. See
+[Roadmap](#12-roadmap).
 
 ---
 
@@ -716,9 +726,9 @@ Project-internal: `water-surface-modeling-primer.md` (the physics rationale) and
 |---|---|---|
 | 1 | `spectrum.py`, `moments.py` | **Implemented** |
 | 2 | `surface.py`, `tiling.py` | **Implemented** |
-| 3 | `tests/`, `docs/validation_report.md` | **Implemented** — 46 checks, see [Validating a build](#13-validating-a-build) |
-| 4 | Terrain and lake basin in Houdini | Not started |
-| 5 | `nearshore.py`, `foam.py` — shoaling, refraction, breaking | Not started |
+| 3 | `tests/`, `docs/validation_report.md` | **Implemented** — 72 checks, see [Validating a build](#13-validating-a-build) |
+| 4 | Terrain and lake basin in Houdini | Not started — `bathymetry.py` stands in |
+| 5 | `nearshore.py`, `foam.py` — shoaling, refraction, breaking | **Implemented** — see [The nearshore](#14-the-nearshore) |
 | 6 | `mesh.py`, `channels.py`, `export.py` — displaced mesh, LOD | Not started |
 | 7 | Mitsuba `roughwater` BSDF plugin | Not started |
 | 8 | Emissivity table | Not started |
@@ -786,3 +796,175 @@ Both are documented in full under *Gate deviations* in the generated report:
    asserts Gaussianity instead (`|skew| < 0.05`, `|excess kurtosis| < 0.1`) and
    reports the displaced value without bounding it. Positive elevation skewness
    requires second-order Stokes bound harmonics, which are not implemented.
+
+---
+
+## 14. The nearshore
+
+Phase 5 transforms the deep-water surface as it approaches shore. It is built
+and validated against a **synthetic** Dean beach (`pywave.bathymetry`), because a
+synthetic profile has closed-form answers — Green's law, Snell's law, the breaker
+index — that an exported heightfield cannot supply.
+
+### 14.1 What the numbers say to build
+
+Run the arithmetic before writing code (cookbook 5.1). For the test lake:
+
+```
+Hs = 0.086 m,  Tp = 1.05 s,  λp = 1.7 m,  max depth 5 m
+deep-water cutoff = λ/2 = 0.85 m
+```
+
+**The lake is deep water everywhere except the last few metres.** Breaking
+happens in ~10 cm of water, the surf zone is ~1 m wide, and the swash excursion
+is 0.38 m. At 1 m GSD that entire zone is sub-pixel. So:
+
+- **Shoaling and refraction are geometry.** They act over tens of metres and are
+  resolved at sensor scale. Modelled as fields applied to the surface.
+- **Breaking and swash are channels.** Sub-pixel. Modelled as per-cell fractional
+  coverage. Building animated swash geometry would be weeks of work invisible at
+  this resolution.
+
+### 14.2 Bathymetry — the Phase 4 stand-in
+
+```python
+from pywave.bathymetry import Bathymetry
+
+beach = Bathymetry.dean_beach()          # straight shoreline, contours parallel
+bay   = Bathymetry.dean_embayment()      # cosine shoreline: bays and headlands
+
+beach.depth          # z_w - z_terrain, positive in water   [ny, nx]
+beach.sdf            # signed distance to the waterline, positive INLAND
+beach.shore_normal   # (2, ny, nx) unit vectors pointing inland
+beach.validate()     # the cookbook 4.5 assertion set; raises on failure
+depth, sdf, normal = beach.sample(x, y)  # bilinear, at world coordinates
+```
+
+The profile is Dean's `h = A·y^(2/3)` — concave up, which real beaches are and a
+linear ramp is not. `A` comes from sediment grain size (`DEAN_A`,
+`dean_A_for_grain_size`).
+
+**The field contract is identical to what Houdini will export**, so Phase 4 is a
+loader swap rather than a physics change. `validate()` is written to be pointed
+at real data unmodified.
+
+One ordering subtlety: Dean's profile is a function of distance offshore, which
+is `|sdf|` — so the signed distance must exist *before* the depth does. The
+shoreline is defined geometrically, the sdf comes from an exact Euclidean
+distance transform of the water mask, and the depth follows from the sdf.
+
+### 14.3 Shoaling
+
+```python
+from pywave import nearshore
+
+ks = nearshore.shoaling_coefficient(omega, depth)   # Ks = sqrt(Cg_deep / Cg)
+```
+
+Takes `omega`, never `k` — frequency is what is conserved as a wave shoals.
+
+`Ks` is **not monotonic**: it dips to 0.913 near `kd = 1.2` before rising, and
+recovers Green's law `Ks ~ d^(-1/4)` in the shallow limit. An implementation that
+clamps `Ks ≥ 1` on the assumption that shoaling makes waves bigger would pass a
+shallow-water check and still be wrong across the whole intermediate band —
+which, for these 1-second waves, is where the beach actually is.
+
+Applied **per spectral band**, not as one scalar, because it is
+frequency-dependent (`nearshore.tile_frequencies` reduces each tile to its energy
+centroid). This is a concrete reason the tiles carry disjoint bands.
+
+### 14.4 Refraction
+
+```python
+theta, alpha = nearshore.refraction_angle(theta_deep, shore_normal, depth, omega)
+kr = nearshore.refraction_coefficient(alpha_deep, alpha)
+```
+
+Snell's law against the full dispersion relation: `sin(α)/c = const`. The
+invariant is conserved to 2.6e-16 on a planar beach.
+
+`Kr = sqrt(cos α_deep / cos α) ≤ 1` always, on straight parallel contours:
+oblique waves spread their energy over a longer stretch of shoreline. At 45°
+incidence on this beach, `Kr` very nearly cancels the shoaling gain — so a test
+that did not control for incidence angle would conclude shoaling does nothing.
+
+Total local height is `H = H_deep · Ks · Kr`.
+
+`nearshore.refraction_angle_blend` implements the cookbook's cheaper
+depth-weighted blend. It is **not** the production path — it has no frequency
+dependence and over-aligns at the waterline. The disagreement is measured in the
+validation report (38.5° peak).
+
+### 14.5 Breaking and wetness
+
+```python
+nearshore.breaking_mask(hs_local, depth, gamma_b=0.78)
+nearshore.iribarren_number(slope, hs, l0)   # xi = 0.30 here -> spilling
+nearshore.hunt_runup(xi, hs)                # 2.5 cm vertical
+nearshore.swash_width(runup, slope)         # 0.38 m horizontal
+nearshore.wetness_fraction(sdf, band)       # duty cycle -> the thermal channel
+nearshore.wetness(sdf, band, t, period)     # instantaneous -> the shader
+```
+
+Inside the surf zone the height is depth-limited: `H = γ_b·d` exactly, so the
+zone saturates instead of letting `Ks` diverge at the waterline.
+
+**Two wetness functions, deliberately.** `wetness_fraction` is the fraction of a
+wave period a point spends submerged — a closed-form duty cycle,
+`(1/π)·arccos(2s/W − 1)`. That is what drives thermal inertia, and hence the cold
+capillary-fringe line that is one of the most diagnostic features in a daytime
+littoral LWIR image. A per-frame binary mask would be the wrong input to Hotts.
+`wetness` is the instantaneous smoothstepped field for rendering. They agree in
+shape but are not the same function.
+
+### 14.6 Foam — the one stateful field
+
+```python
+from pywave import foam
+
+model = foam.FoamModel(bathy=beach, half_life=3.0)
+f = model.evaluate(lambda t: breaking_at(t), cg, t=120.0)   # cold-started
+```
+
+Foam has frame-to-frame memory, which would otherwise destroy the "any node, any
+frame" property. The fix is **bounded spin-up**: to evaluate time `t`, start from
+zero far enough back that the discarded history has decayed below tolerance.
+
+The window is set by the half life, **not** by a frame count:
+
+```
+T_spin = t_half · log2(1/tol)      # 23 s for 0.5% at a 3 s half life
+```
+
+`foam.spinup_steps()` computes it and `evaluate` calls it by default. The
+cookbook's "30 frames is plenty" is one second against a 3 s half life, leaving
+79% of the initial condition intact — measured cold-vs-sequential error 2.2% per
+cell, against the 1% the gate asks for. At the default it is 0.61%.
+
+Foam does not sub-step at the frame rate: advection is semi-Lagrangian and
+unconditionally stable, so 0.25 s costs 6× less for no visible difference.
+
+### 14.7 Putting it together
+
+```python
+nf = nearshore.transform(tileset, beach, cfg, x, y, t)
+
+nf.surface     # SurfaceField, shoaled/refracted/depth-limited
+nf.hs_local    # local significant height after transformation
+nf.breaking    # bool mask
+nf.wetness     # duty cycle in the swash band
+nf.depth, nf.sdf, nf.shoaling, nf.limiter
+```
+
+**What is approximate, stated plainly.** The FFT surface is
+translation-invariant; refraction is not. `transform` rotates the local wave
+*direction* — displacement and slope vectors, hence the surface normal, hence
+everything the BSDF sees — but does not re-solve the wave field, so crest
+*positions* do not move. Shoaling is applied as a per-band amplitude scale, exact
+for the amplitude and ignoring the accompanying wavelength shortening. A full
+mild-slope or Boussinesq solver is a much larger project and unnecessary at 8 cm
+wave heights.
+
+What is *not* approximated is the coefficient physics: `shoaling_coefficient` and
+`refraction_angle` solve the full dispersion relation and Snell's law, and the
+tests check them against closed-form answers at every cell.

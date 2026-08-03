@@ -26,5 +26,6 @@ markers = [
     "gate1: Phase 1 gate checks (spectrum)",
     "gate2: Phase 2 gate checks (FFT surface synthesis)",
     "gate3: Phase 3 gate checks (validation suite / reproducibility)",
+    "gate5: Phase 5 gate checks (nearshore transformation)",
     "slow: takes more than a couple of seconds",
 ]

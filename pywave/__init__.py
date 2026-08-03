@@ -19,14 +19,22 @@ Phase 3 (validation suite)         implemented -- ``tests/`` automates the
                                    criteria are provably unmeetable and carry
                                    substituted criteria; see the "Gate
                                    deviations" section of that report.
-Phase 4+ (nearshore, mesh, BSDF)   not started
+Phase 4 (Houdini terrain)          not started -- ``bathymetry.py`` supplies a
+                                   synthetic Dean profile satisfying the same
+                                   section 4.5 field contract, so Phase 4 is a
+                                   loader swap rather than a physics change.
+Phase 5 (nearshore, foam)          implemented against that synthetic profile.
+                                   Shoaling, Snell refraction, depth-limited
+                                   breaking, swash wetness and foam with
+                                   bounded spin-up.
+Phase 6+ (mesh, BSDF, emissivity)  not started
 
 See ``docs/users_guide.md`` for the user-facing documentation.
 """
 
 from __future__ import annotations
 
-from . import constants, moments, spectrum, surface, tiling
+from . import bathymetry, constants, foam, moments, nearshore, spectrum, surface, tiling
 from .config import Config, load_config
 
 __version__ = "0.1.0"
@@ -37,6 +45,9 @@ __all__ = [
     "moments",
     "surface",
     "tiling",
+    "bathymetry",
+    "nearshore",
+    "foam",
     "Config",
     "load_config",
     "__version__",

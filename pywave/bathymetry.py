@@ -1,0 +1,364 @@
+"""PHASE 5 (support) -- synthetic bathymetry standing in for the Phase 4 export.
+
+Phase 4 builds the lake basin in Houdini and exports six fields.  Phase 5 needs
+three of them -- ``depth``, ``sdf`` and ``shore_normal`` -- and nothing else.
+This module manufactures those three analytically, so the nearshore physics can
+be written and validated before Houdini exists.
+
+Why this is worth doing rather than waiting for Phase 4
+------------------------------------------------------
+A synthetic profile has closed-form answers.  Shoaling on a Dean beach can be
+checked against Green's law, refraction against Snell's law, and the breaker
+line against ``d = H/gamma_b`` -- all exactly, at every cell.  An exported
+heightfield gives none of that: it can only be checked against itself.  So the
+synthetic profile is not a placeholder to be thrown away, it is the *oracle*
+Phase 4's real bathymetry will be checked against.
+
+The contract is deliberately identical to what ``export_fields.py`` will write
+(cookbook section 4.5), so swapping in real data is a loader change and not a
+physics change:
+
+============  ==============================================================
+Field         Definition
+============  ==============================================================
+depth         ``z_w - z_terrain``.  Positive in water, negative on land.
+sdf           Signed distance to the ``z = z_w`` contour.  **Negative in
+              water, positive on land** -- the opposite sign to depth, so
+              ``s`` reads as "distance inland" (cookbook section 0.3).
+shore_normal  ``grad(s) / |grad(s)|``, unit, pointing **inland**.
+============  ==============================================================
+
+Reference
+---------
+Dean, R.G. (1977). "Equilibrium beach profiles: U.S. Atlantic and Gulf coasts."
+    Ocean Engineering Report No. 12, University of Delaware.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import numpy as np
+
+__all__ = [
+    "DEAN_A",
+    "GridMeta",
+    "Bathymetry",
+    "dean_depth",
+    "dean_slope",
+    "dean_A_for_grain_size",
+]
+
+
+# Dean's scale parameter A [m^(1/3)] by sediment grain size.  Dean (1977),
+# tabulated in most coastal engineering texts.  Coarser sediment stands at a
+# steeper equilibrium profile.
+DEAN_A = {
+    "fine_sand": 0.079,      # D50 ~ 0.15 mm
+    "medium_sand": 0.100,    # D50 ~ 0.25 mm
+    "coarse_sand": 0.125,    # D50 ~ 0.50 mm
+    "gravel": 0.200,         # D50 ~ 2 mm
+}
+"""``A`` in ``h = A * y^(2/3)``, keyed by sediment class [m^(1/3)]."""
+
+
+def dean_A_for_grain_size(d50_mm: float) -> float:
+    """Dean's ``A`` from median grain diameter [mm].
+
+    Fits ``A = 0.21 * D50^0.48`` over 0.1-1 mm, which reproduces the tabulated
+    values in :data:`DEAN_A` to a few percent. Outside that range it is an
+    extrapolation and should be treated as such.
+    """
+    if d50_mm <= 0:
+        raise ValueError(f"d50_mm must be positive, got {d50_mm}")
+    return 0.21 * d50_mm**0.48
+
+
+def dean_depth(offshore_distance, a: float) -> np.ndarray:
+    """Equilibrium beach profile ``h = A * y^(2/3)`` [m].
+
+    Concave-up, which is what real beaches are and what a linear ramp is not.
+    ``offshore_distance`` is measured from the waterline; negative values (i.e.
+    landward) return 0.
+    """
+    y = np.maximum(np.asarray(offshore_distance, dtype=np.float64), 0.0)
+    return a * y ** (2.0 / 3.0)
+
+
+def dean_slope(offshore_distance, a: float) -> np.ndarray:
+    """Local bed slope ``dh/dy = (2/3) A y^(-1/3)`` [-].
+
+    Diverges at the waterline -- the Dean profile is not differentiable there.
+    Callers that need a slope at ``y = 0`` (runup, Iribarren) should evaluate it
+    a realistic swash-width offshore instead; :meth:`Bathymetry.beach_slope`
+    does exactly that.
+    """
+    y = np.maximum(np.asarray(offshore_distance, dtype=np.float64), 1e-9)
+    return (2.0 / 3.0) * a * y ** (-1.0 / 3.0)
+
+
+@dataclass(frozen=True)
+class GridMeta:
+    """Georeferencing for a field grid -- mirrors Phase 4's ``grid_meta.json``."""
+
+    origin: tuple[float, float]
+    """World coordinates of cell ``[0, 0]`` [m]."""
+    dx: float
+    """Cell size [m], square cells."""
+    shape: tuple[int, int]
+    """``(ny, nx)``."""
+    water_level: float
+    """``z_w`` [m]."""
+    epsg: int = 32616
+
+    @property
+    def extent(self) -> tuple[float, float, float, float]:
+        """``(x_min, x_max, y_min, y_max)`` [m]."""
+        ny, nx = self.shape
+        x0, y0 = self.origin
+        return x0, x0 + nx * self.dx, y0, y0 + ny * self.dx
+
+    def axes(self) -> tuple[np.ndarray, np.ndarray]:
+        """Cell-centre coordinate axes ``(x, y)`` [m]."""
+        ny, nx = self.shape
+        x0, y0 = self.origin
+        return (x0 + (np.arange(nx) + 0.5) * self.dx,
+                y0 + (np.arange(ny) + 0.5) * self.dx)
+
+
+@dataclass(frozen=True)
+class Bathymetry:
+    """Depth, signed distance and shore normal on a regular grid.
+
+    All arrays are ``[y, x]``, matching the section 0.4 data contract.
+    """
+
+    meta: GridMeta
+    depth: np.ndarray
+    """``z_w - z_terrain`` [m]. Positive in water."""
+    sdf: np.ndarray
+    """Signed distance to the waterline [m]. Negative in water."""
+    shore_normal: np.ndarray
+    """``(2, ny, nx)`` unit vectors pointing inland."""
+    dean_a: float
+    """The ``A`` used to build the profile [m^(1/3)]."""
+
+    # -- construction --------------------------------------------------------
+
+    @classmethod
+    def dean_beach(
+        cls,
+        nx: int = 512,
+        ny: int = 512,
+        dx: float = 1.0,
+        shoreline_y: float = 400.0,
+        dean_a: float = DEAN_A["medium_sand"],
+        max_depth: float = 5.0,
+        bank_slope: float = 0.08,
+        water_level: float = 100.0,
+        origin: tuple[float, float] = (0.0, 0.0),
+        epsg: int = 32616,
+    ) -> "Bathymetry":
+        """A straight shoreline running along +X, water on the **-Y** side.
+
+        Land occupies ``y > shoreline_y``, so the shore normal points along +Y
+        and a wind blowing toward the north-east drives waves *onto* the beach.
+        Getting that the wrong way round makes every refraction angle obtuse and
+        every shoaling coefficient meaningless, so the orientation is fixed here
+        rather than left to the caller.
+
+        The simplest useful case: contours are straight and parallel, which is
+        exactly the geometry Snell's law is stated for, so refraction has a
+        closed-form answer everywhere.
+        """
+        return cls._from_shoreline(
+            lambda x: np.full_like(x, shoreline_y), nx, ny, dx, dean_a,
+            max_depth, bank_slope, water_level, origin, epsg,
+        )
+
+    @classmethod
+    def dean_embayment(
+        cls,
+        nx: int = 512,
+        ny: int = 512,
+        dx: float = 1.0,
+        shoreline_y: float = 380.0,
+        amplitude: float = 40.0,
+        wavelength: float = 400.0,
+        dean_a: float = DEAN_A["medium_sand"],
+        max_depth: float = 5.0,
+        bank_slope: float = 0.08,
+        water_level: float = 100.0,
+        origin: tuple[float, float] = (0.0, 0.0),
+        epsg: int = 32616,
+    ) -> "Bathymetry":
+        """A cosine-perturbed shoreline: alternating bays and headlands.
+
+        Curved contours are what make refraction interesting -- wave energy
+        focuses on headlands and spreads in bays. A straight beach cannot show
+        that, so this case exists to check the shore normal is doing real work
+        rather than being a constant.
+        """
+        def curve(x):
+            return shoreline_y + amplitude * np.cos(2.0 * np.pi * x / wavelength)
+
+        return cls._from_shoreline(curve, nx, ny, dx, dean_a, max_depth,
+                                   bank_slope, water_level, origin, epsg)
+
+    @classmethod
+    def _from_shoreline(cls, curve, nx, ny, dx, dean_a, max_depth, bank_slope,
+                        water_level, origin, epsg) -> "Bathymetry":
+        """Build the three fields from a shoreline curve ``y = curve(x)``.
+
+        The order matters and is not the obvious one. Dean's profile is a
+        function of *distance offshore*, which is `|sdf|` -- so the signed
+        distance has to exist before the depth does. Deriving the sdf from a
+        depth field that was itself built from a distance would be circular.
+        Here the shoreline is defined geometrically, the sdf comes from an exact
+        Euclidean distance transform of the resulting water mask (cookbook 4.5
+        specifically calls for EDT rather than an approximate SDF, because Phase
+        5 differentiates it), and the depth follows from the sdf.
+        """
+        from scipy.ndimage import distance_transform_edt, gaussian_filter
+
+        meta = GridMeta(origin=origin, dx=float(dx), shape=(int(ny), int(nx)),
+                        water_level=float(water_level), epsg=int(epsg))
+        x_axis, y_axis = meta.axes()
+        xx, yy = np.meshgrid(x_axis, y_axis, indexing="xy")
+
+        water = yy < curve(xx)
+        if not water.any() or water.all():
+            raise ValueError("shoreline does not cross the grid; check the curve "
+                             "and the domain extent")
+
+        # Exact Euclidean distance to the waterline, in metres, both sides.
+        inside = distance_transform_edt(water, sampling=dx)
+        outside = distance_transform_edt(~water, sampling=dx)
+        # s > 0 on land, s < 0 in water. The half-cell offset centres the zero
+        # contour on the boundary rather than on the first land cell.
+        sdf = (outside - inside) + np.where(water, 0.5 * dx, -0.5 * dx)
+
+        offshore = np.maximum(-sdf, 0.0)
+        depth = np.minimum(dean_depth(offshore, dean_a), max_depth)
+        depth = np.where(water, depth, -bank_slope * sdf)
+
+        # Shore normal. Cookbook 4.5: smooth s slightly before differentiating,
+        # because raw EDT is noisy at the pixel level and that noise propagates
+        # straight into the refraction direction.
+        s_smooth = gaussian_filter(sdf, sigma=1.5, mode="nearest")
+        gy, gx = np.gradient(s_smooth, dx)
+        mag = np.hypot(gx, gy)
+        mag = np.where(mag > 1e-12, mag, 1.0)
+        shore_normal = np.stack([gx / mag, gy / mag])
+
+        return cls(meta=meta, depth=depth, sdf=sdf,
+                   shore_normal=shore_normal, dean_a=float(dean_a))
+
+    # -- derived -------------------------------------------------------------
+
+    @property
+    def water_mask(self) -> np.ndarray:
+        return self.depth > 0.0
+
+    @property
+    def terrain_z(self) -> np.ndarray:
+        """Bed elevation [m]. ``depth = z_w - terrain_z`` by construction."""
+        return self.meta.water_level - self.depth
+
+    def beach_slope(self, at_depth: float = 0.1) -> float:
+        """Representative foreshore slope, evaluated at a finite depth [-].
+
+        The Dean profile's slope diverges at the waterline, so "the beach slope"
+        is only meaningful once you say where. Runup and Iribarren want the
+        slope over the swash zone, so the default samples at 10 cm depth -- the
+        depth where 8 cm waves break.
+        """
+        y = (at_depth / self.dean_a) ** 1.5
+        return float(dean_slope(y, self.dean_a))
+
+    def sample(self, x, y):
+        """Bilinear sample of ``(depth, sdf, shore_normal)`` at world points.
+
+        Returns ``(depth, sdf, normal)`` where ``normal`` has shape ``(2, ...)``.
+        Coordinates outside the grid clamp to the edge -- these fields are not
+        periodic, unlike the wave tiles.
+        """
+        from scipy.ndimage import map_coordinates
+
+        x = np.asarray(x, dtype=np.float64)
+        y = np.asarray(y, dtype=np.float64)
+        x0, y0 = self.meta.origin
+        coords = np.stack([(y - y0) / self.meta.dx - 0.5,
+                           (x - x0) / self.meta.dx - 0.5])
+
+        def grab(field):
+            return map_coordinates(field, coords, order=1, mode="nearest")
+
+        nx_ = grab(self.shore_normal[0])
+        ny_ = grab(self.shore_normal[1])
+        mag = np.hypot(nx_, ny_)
+        mag = np.where(mag > 1e-12, mag, 1.0)
+        return grab(self.depth), grab(self.sdf), np.stack([nx_ / mag, ny_ / mag])
+
+    # -- the Phase 4 assertion set -------------------------------------------
+
+    def validate(self, sdf_tol: float = 1.0) -> dict[str, float]:
+        """The checks cookbook section 4.5 requires of any loaded field set.
+
+        Written against this synthetic data so that the same function can be
+        pointed at Houdini's export in Phase 4 without modification.
+
+        ``sdf_tol`` is in metres and bounds the band around the waterline in
+        which the depth/sdf sign relation is allowed to disagree: both fields
+        are discretised on the same grid, so within about one cell of the
+        contour the two signs can legitimately differ.
+
+        Returns the measured quantities, and raises if any check fails.
+        """
+        ny, nx = self.meta.shape
+        if self.depth.shape != (ny, nx):
+            raise AssertionError(f"depth shape {self.depth.shape} != {(ny, nx)}")
+        if self.sdf.shape != (ny, nx):
+            raise AssertionError(f"sdf shape {self.sdf.shape} != {(ny, nx)}")
+        if self.shore_normal.shape != (2, ny, nx):
+            raise AssertionError(f"shore_normal shape {self.shore_normal.shape}")
+
+        # depth = z_w - terrain_z, exactly
+        depth_residual = float(np.max(np.abs(
+            self.depth - (self.meta.water_level - self.terrain_z))))
+        if depth_residual > 1e-12:
+            raise AssertionError(f"depth != z_w - terrain_z (max {depth_residual:.3e})")
+
+        # sign(sdf) == -sign(depth), away from the contour
+        far = np.abs(self.sdf) > sdf_tol
+        agree = np.sign(self.sdf[far]) == -np.sign(self.depth[far])
+        disagree_frac = float(1.0 - agree.mean())
+        if disagree_frac > 0.0:
+            raise AssertionError(
+                f"sign(sdf) != -sign(depth) at {100 * disagree_frac:.3f}% of cells "
+                f"further than {sdf_tol} m from the waterline")
+
+        # |shore_normal| = 1 in the nearshore band
+        band = np.abs(self.sdf) < 60.0
+        norm = np.hypot(self.shore_normal[0], self.shore_normal[1])[band]
+        norm_err = float(np.max(np.abs(norm - 1.0)))
+        if norm_err > 1e-6:
+            raise AssertionError(f"|shore_normal| != 1 (max error {norm_err:.3e})")
+
+        # the normal must point inland, i.e. up the sdf gradient
+        gy, gx = np.gradient(self.sdf, self.meta.dx)
+        dot = (self.shore_normal[0] * gx + self.shore_normal[1] * gy)[band]
+        inland_frac = float((dot > 0).mean())
+        if inland_frac < 0.99:
+            raise AssertionError(
+                f"shore_normal points inland at only {100 * inland_frac:.1f}% of "
+                f"nearshore cells")
+
+        return {
+            "depth_residual": depth_residual,
+            "sdf_sign_disagreement": disagree_frac,
+            "shore_normal_magnitude_error": norm_err,
+            "shore_normal_inland_fraction": inland_frac,
+            "max_depth": float(self.depth.max()),
+            "beach_slope_at_10cm": self.beach_slope(),
+        }

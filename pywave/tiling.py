@@ -256,7 +256,8 @@ class TileSet:
         return composite_surface(self.tiles, x, y, t, fields=fields, order=order)
 
 
-def composite_surface(tiles, x, y, t: float, fields=None, order: int = 3) -> SurfaceField:
+def composite_surface(tiles, x, y, t: float, fields=None, order: int = 3,
+                      weights=None, rotate=None) -> SurfaceField:
     """Sum tiles sampled at ``(x, y) mod tile size``, each with its own rotation.
 
     Frames and rotations
@@ -275,14 +276,32 @@ def composite_surface(tiles, x, y, t: float, fields=None, order: int = 3) -> Sur
 
     (The counter-rotation of the wind direction that keeps wave headings correct
     happens at tile *construction*; see ``WaveTile.build``.)
+
+    Nearshore hooks
+    ---------------
+    ``weights`` and ``rotate`` exist for Phase 5 and default to no-ops.
+
+    ``weights`` is one amplitude scale per tile, broadcastable against the
+    sample points -- the per-band shoaling gain, which must be applied per band
+    because shoaling is frequency-dependent.
+
+    ``rotate`` is an *additional* per-point rotation applied to the vector
+    quantities only, on top of ``phi``: the local refraction angle.  It turns
+    the surface normal without moving the sample position, which is exactly the
+    approximation Phase 5 documents -- the wave field is not re-solved, so crest
+    positions do not move, but everything the BSDF sees is reoriented.
     """
     x = np.asarray(x, dtype=np.float64)
     y = np.asarray(y, dtype=np.float64)
     if fields is None:
         fields = [tile.evaluate(t) for tile in tiles]
+    if weights is None:
+        weights = [1.0] * len(list(tiles))
+    if rotate is None:
+        rotate = [0.0] * len(list(tiles))
 
     total = None
-    for tile, field in zip(tiles, fields):
+    for tile, field, weight, psi in zip(tiles, fields, weights, rotate):
         phi = tile.rotation
         c, s = np.cos(phi), np.sin(phi)
 
@@ -296,13 +315,15 @@ def composite_surface(tiles, x, y, t: float, fields=None, order: int = 3) -> Sur
         sxl = sample_periodic(field.slope_x, xl, yl, tile.size, order)
         syl = sample_periodic(field.slope_y, xl, yl, tile.size, order)
 
-        # tile frame -> world, for the vector quantities only
+        # tile frame -> world, for the vector quantities only, plus any
+        # per-point refraction rotation.
+        cv, sv = np.cos(phi + psi), np.sin(phi + psi)
         contribution = SurfaceField(
-            h=h,
-            dx_disp=c * dxl - s * dyl,
-            dy_disp=s * dxl + c * dyl,
-            slope_x=c * sxl - s * syl,
-            slope_y=s * sxl + c * syl,
+            h=weight * h,
+            dx_disp=weight * (cv * dxl - sv * dyl),
+            dy_disp=weight * (sv * dxl + cv * dyl),
+            slope_x=weight * (cv * sxl - sv * syl),
+            slope_y=weight * (sv * sxl + cv * syl),
         )
         total = contribution if total is None else total + contribution
 
