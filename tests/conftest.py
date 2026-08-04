@@ -203,6 +203,7 @@ _GATE_TITLES = {
     "1": "Gate 1 -- spectrum and moments",
     "2": "Gate 2 -- FFT surface synthesis",
     "3": "Gate 3 -- reproducibility and regression",
+    "4": "Gate 4 -- terrain export loading",
     "5": "Gate 5 -- nearshore transformation",
     "6": "Gate 6 -- mesh generation and export",
 }
@@ -259,7 +260,7 @@ def pytest_sessionfinish(session, exitstatus):
     )
     lines.append("")
 
-    for gate in ("1", "2", "3", "5", "6"):
+    for gate in ("1", "2", "3", "4", "5", "6"):
         rows = [c for c in checks if c.gate == gate]
         if not rows:
             continue

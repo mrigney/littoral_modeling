@@ -146,11 +146,17 @@ def scene_summary(scene) -> dict:
                 np.pi / mesh_dx, u10, fetch, gamma=gamma))),
             "rings": [{"r_m": r.r, "dx_m": r.dx} for r in cfg.output.lod_rings],
         },
+        "bathymetry": beach.summary(),
         "nearshore": {
-            "profile": cfg.bathymetry.profile,
-            "dean_A": cfg.bathymetry.a,
-            "shoreline_y_m": cfg.bathymetry.shoreline,
-            "max_depth_m": cfg.bathymetry.max_depth,
+            # Describe what is actually loaded, not the synthetic keys the
+            # config still carries -- when `source` is set those are ignored,
+            # and reporting them as if they were in force is how a reader ends
+            # up believing a Dean profile is in play when it is not.
+            "profile": ("loaded export" if cfg.bathymetry.is_export
+                        else cfg.bathymetry.profile),
+            "source": cfg.bathymetry.source,
+            "dean_A": (None if cfg.bathymetry.is_export else cfg.bathymetry.a),
+            "max_depth_m": float(beach.depth.max()),
             "foreshore_slope": slope,
             "iribarren_xi": xi,
             "breaker_type": str(nearshore.breaker_type(xi)),
@@ -254,9 +260,13 @@ def write_summary_md(summary: dict, path: Path) -> None:
         "",
         "| Quantity | Value |",
         "|---|---|",
-        f"| Profile | {s['nearshore']['profile']}, Dean A = "
-        f"{_fmt(s['nearshore']['dean_A'])} |",
-        f"| Foreshore slope | {100 * s['nearshore']['foreshore_slope']:.1f}% |",
+        (f"| Bathymetry | loaded from `{s['nearshore']['source']}` |"
+         if s['nearshore']['source'] else
+         f"| Profile | {s['nearshore']['profile']}, Dean A = "
+         f"{_fmt(s['nearshore']['dean_A'])} |"),
+        f"| Max depth | {_fmt(s['nearshore']['max_depth_m'])} m |",
+        (f"| Foreshore slope | {100 * s['nearshore']['foreshore_slope']:.1f}% "
+         f"({'measured from the bed' if s['nearshore']['source'] else 'analytic'}) |"),
         f"| Iribarren number ξ | {_fmt(s['nearshore']['iribarren_xi'])} "
         f"(**{s['nearshore']['breaker_type']}** breakers) |",
         f"| Breaking depth | {_fmt(s['nearshore']['breaker_depth_m'])} m |",
@@ -359,14 +369,18 @@ def _default_region(scene, posts: int = 900):
     (the shipped lake is 64 M), so the default is a window on the waterline --
     which is the interesting part and the part LOD rings would otherwise be
     protecting.
+
+    Where that window goes comes from `Scene.shore_ref`, which is arithmetic for
+    a synthetic beach and a search for real terrain -- see there.
     """
     cfg = scene.cfg
     dx = cfg.output.mesh_dx
     span = posts * dx
     b = scene.fine_bathy
     x0b, x1b, y0b, y1b = b.meta.extent
-    cx = 0.5 * (x0b + x1b)
-    shore = cfg.bathymetry.shoreline
+
+    cx, shore = scene.shore_ref
+
     return (max(cx - 0.5 * span, x0b), max(shore - 0.75 * span, y0b),
             min(cx + 0.5 * span, x1b), min(shore + 0.1 * span, y1b))
 

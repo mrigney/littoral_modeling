@@ -35,7 +35,8 @@ import numpy as np
 
 __all__ = ["write_ply", "write_obj", "write_frame_metadata", "export_frame",
            "read_ply", "mitsuba_scene_params", "mitsuba_scene_dict",
-           "write_mitsuba_scene", "write_mitsuba_xml"]
+           "write_mitsuba_scene", "write_mitsuba_xml",
+           "write_terrain_export"]
 
 _PLY_TYPES = {
     np.dtype(np.float32): "float",
@@ -634,3 +635,52 @@ def write_mitsuba_xml(path, water_ply, terrain_ply, *, water_mesh=None,
         raise ValueError("XML comment contains an illegal double hyphen")
     path.write_text(xml, encoding="utf-8")
     return path
+
+
+# ---------------------------------------------------------------------------
+# Terrain export (the Phase 4 side of the contract)
+# ---------------------------------------------------------------------------
+
+
+def write_terrain_export(bathy, directory) -> dict:
+    """Write a :class:`~pywave.bathymetry.Bathymetry` as a Phase 4 export.
+
+    The inverse of :meth:`~pywave.bathymetry.Bathymetry.from_export`, writing
+    the six files cookbook section 4.5 specifies.  Two uses:
+
+    * round-tripping the loader in tests without needing a real Houdini export
+      to be present, which is what makes the loader testable at all on a machine
+      that has not run Houdini;
+    * snapshotting a synthetic basin so it can be handed to something that
+      expects real terrain.
+
+    ``shore_normal`` is written ``(2, ny, nx)``, matching this package's internal
+    layout.  The section 0.4 table writes ``(ny, nx, 2)``; the loader accepts
+    either, precisely because both conventions are in circulation.
+    """
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    m = bathy.meta
+    ny, nx = m.shape
+
+    np.save(directory / "terrain_z.npy",
+            np.asarray(bathy.terrain_z, dtype=np.float32))
+    np.save(directory / "depth.npy", np.asarray(bathy.depth, dtype=np.float32))
+    np.save(directory / "sdf.npy", np.asarray(bathy.sdf, dtype=np.float32))
+    np.save(directory / "shore_normal.npy",
+            np.asarray(bathy.shore_normal, dtype=np.float32))
+
+    bottom = bathy.bottom_type
+    if bottom is None:
+        # No sediment classification to write, so record the one distinction
+        # that is actually known: wet or dry.
+        bottom = (bathy.depth > 0.0).astype(np.uint8)
+    np.save(directory / "bottom_type.npy", np.asarray(bottom, dtype=np.uint8))
+
+    meta = {"x0": float(m.origin[0]), "y0": float(m.origin[1]),
+            "dx": float(m.dx), "dy": float(m.dx),
+            "nx": int(nx), "ny": int(ny),
+            "z_w": float(m.water_level), "epsg": int(m.epsg)}
+    (directory / "grid_meta.json").write_text(json.dumps(meta, indent=4) + "\n",
+                                              encoding="utf-8")
+    return meta

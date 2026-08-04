@@ -18,13 +18,38 @@ anisotropy — as physically derived numbers rather than art-directed knobs.
 | 1 | JONSWAP spectrum, spreading, moments | **Implemented** |
 | 2 | Tessendorf FFT synthesis, multi-tile composition | **Implemented** |
 | 3 | Validation suite, `docs/validation_report.md` | **Implemented** |
-| 4 | Houdini terrain and lake basin | Not started — `bathymetry.py` supplies a synthetic Dean profile satisfying the same field contract |
+| 4 | Houdini terrain and lake basin | **Loader implemented** — `Bathymetry.from_export` reads a §4.5 export; the Houdini side is yours |
 | 5 | Shoaling, refraction, breaking, foam | **Implemented** against that synthetic profile |
 | 6 | Mesh generation, channel packing, PLY export | **Implemented** — constant post spacing; §6.2 LOD rings deliberately deferred |
 | 7–10 | Mitsuba BSDF, emissivity, EMBER integration | Not started |
 
 **New here?** [docs/gallery.md](docs/gallery.md) explains the whole model in
 eight figures, with no code required.
+
+## Use real terrain
+
+Point a scene at a Phase 4 export and everything downstream follows — no code
+changes, because the synthetic bathymetry was built to satisfy the same contract:
+
+```yaml
+bathymetry:
+  source: houdini_export      # the six §4.5 files; other keys then ignored
+```
+
+```bash
+python scripts/run_scene.py configs/houdini_lake.yaml --mesh
+```
+
+The loader checks the export against the same assertion set the synthetic basin
+is held to — `depth == z_w − terrain_z`, `sign(sdf) == −sign(depth)`, unit
+inland-pointing normals — and refuses rather than proceeding on data that would
+produce a plausible-looking wrong answer. `shore_normal` is accepted as either
+`(2, ny, nx)` or `(ny, nx, 2)`.
+
+Real terrain has no analytic profile, so `beach_slope()` **measures the bed**
+instead of evaluating Dean's formula, and everything downstream (breaker type,
+runup, swash) follows from the measurement. Exports are gitignored by default;
+`git add -f` one deliberately if you want the Gate 4 checks to run in CI.
 
 ## Run a scene
 
@@ -174,7 +199,7 @@ Python 3.11+. Runtime deps: `numpy`, `scipy`, `pyyaml`.
 ## Validate
 
 ```bash
-pytest                    # 91 checks, ~90 s
+pytest                    # 110 checks, ~2 min
 ```
 
 The suite is the traceability argument, not CI hygiene. Every test records the
@@ -238,6 +263,7 @@ tests/
   test_spectrum.py        PHASE 3: Gate 1 checks
   test_surface.py         PHASE 3: Gate 2 checks
   test_reproducibility.py PHASE 3: Gate 3, determinism + regression baseline
+  test_terrain_export.py  PHASE 4: Gate 4, loading a terrain export
   test_nearshore.py       PHASE 5: Gate 5 checks
   test_mesh.py            PHASE 6: Gate 6 checks
   make_baseline.py        regenerates tests/baseline/ (a deliberate act)
@@ -247,8 +273,9 @@ scripts/
   make_figures.py  the eight figures + a markdown gallery
   make_overview.py one self-contained shareable HTML page
 configs/
-  test_lake.yaml    reference scene: 5 m/s wind, 1 km fetch, straight beach
-  coastal_bay.yaml  contrasting scene: 12 m/s, 40 km fetch, embayed shore
+  test_lake.yaml     reference scene: 5 m/s wind, 1 km fetch, straight beach
+  coastal_bay.yaml   contrasting scene: 12 m/s, 40 km fetch, embayed shore
+  houdini_lake.yaml  runs on a real exported terrain (`bathymetry.source`)
 docs/
   gallery.md            the model in eight figures
   users_guide.md

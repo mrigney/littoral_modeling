@@ -183,8 +183,7 @@ class Shoreline:
         # Wide enough to show waves arriving, tight enough to see them break.
         cross = max(25.0 * scene.swash_band, 6.0 * cfg.lambda_p)
         along = cross * 1.5
-        shore = cfg.bathymetry.shoreline
-        x0 = 0.5 * (self.bathy.meta.extent[0] + self.bathy.meta.extent[1])
+        x0, shore = scene.shore_ref
 
         nx = px
         ny = max(int(px * cross / along), 64)

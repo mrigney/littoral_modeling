@@ -143,8 +143,17 @@ class BathymetryConfig:
     bathymetry instead, and everything here becomes the fallback.
     """
 
+    source: str | None = None
+    """Path to a Phase 4 terrain export directory.
+
+    When set, the bathymetry is **loaded** and every synthetic key below is
+    ignored -- the export carries its own grid, extent and water level.  When
+    ``None``, the synthetic basin is built from those keys instead.
+    """
     profile: str = "planar"
-    """``planar`` (straight shoreline) or ``embayment`` (cosine bays and headlands)."""
+    """``planar`` (straight shoreline) or ``embayment`` (cosine bays and headlands).
+
+    Synthetic only; ignored when ``source`` is set."""
     shoreline: float = 400.0
     """Y coordinate of the waterline [m]; water lies below it, land above."""
     dean_a: float | None = None
@@ -167,7 +176,14 @@ class BathymetryConfig:
     wavelength: float = 400.0
     """Embayment only: alongshore period [m]."""
 
+    @property
+    def is_export(self) -> bool:
+        """True when this scene loads real terrain rather than building one."""
+        return self.source is not None
+
     def __post_init__(self) -> None:
+        if self.source is not None and not str(self.source).strip():
+            raise ValueError("bathymetry.source must be a path, or omitted")
         if self.profile not in ("planar", "embayment"):
             raise ValueError(
                 f"bathymetry.profile must be 'planar' or 'embayment', "
@@ -326,6 +342,8 @@ def load_config(path: str | Path) -> Config:
         ),
     )
     bathymetry = BathymetryConfig(
+        source=(None if bath_raw.get("source") is None
+                else str(bath_raw["source"])),
         profile=str(bath_raw.get("profile", "planar")),
         shoreline=float(bath_raw.get("shoreline", 400.0)),
         dean_a=(None if bath_raw.get("dean_a") is None else float(bath_raw["dean_a"])),

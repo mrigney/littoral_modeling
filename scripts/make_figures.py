@@ -130,6 +130,43 @@ class Scene:
                                                   (2, 1024), (4, 1024))]
 
     @property
+    def shore_ref(self):
+        """``(x, y)`` on a representative stretch of shoreline.
+
+        A synthetic beach has a shoreline at a known Y, so this is arithmetic.
+        Real terrain has a closed contour that may be anywhere, so the waterline
+        has to be *found* -- and finding it is not optional: every transect,
+        camera and animation window in this file is positioned relative to it,
+        and a hardcoded Y quietly puts them all in open water.
+
+        Picks the northernmost stretch, because the camera looks from -Y toward
+        +Y and that is the orientation where a shore fills the frame.
+        """
+        def make():
+            cfg = self.cfg
+            b = self.bathy
+            x0, x1, y0, y1 = b.meta.extent
+            if not cfg.bathymetry.is_export:
+                return 0.5 * (x0 + x1), cfg.bathymetry.shoreline
+
+            xa, ya = b.meta.axes()
+            X, Y = np.meshgrid(xa, ya, indexing="xy")
+            shore = np.abs(b.sdf) < 1.5 * b.meta.dx
+            if not shore.any():
+                raise ValueError("no shoreline in the bathymetry")
+            # Take the top decile of latitude, then the cell nearest that
+            # group's median X. Note the last step: medians of X and Y taken
+            # *independently* give a point that need not lie on the contour at
+            # all, and on a curved shore it lands metres out to sea -- which is
+            # exactly where every transect then starts.
+            top = shore & (Y >= np.percentile(Y[shore], 90.0))
+            xs, ys = X[top], Y[top]
+            k = int(np.argmin(np.abs(xs - np.median(xs))))
+            return float(xs[k]), float(ys[k])
+
+        return self._memo("shore_ref", make)
+
+    @property
     def swash_band(self) -> float:
         """Horizontal swash excursion [m], from Hunt runup on this beach."""
         slope = self.bathy.beach_slope()
@@ -162,9 +199,8 @@ class Scene:
     def surf_transect(self, n: int = 1200):
         """``(x, y)`` running from just inside the waterline to well offshore."""
         b = self.fine_bathy
-        x0 = 0.5 * (b.meta.extent[0] + b.meta.extent[1])
+        x0, y_shore = self.shore_ref
         reach = max(30.0 * self.swash_band, 12.0)
-        y_shore = self.cfg.bathymetry.shoreline
         y = np.linspace(y_shore - 0.05, max(y_shore - reach, b.meta.extent[2]), n)
         return np.full(n, x0), y
 
@@ -549,8 +585,8 @@ def fig_shoaling(scene):
     _style(ax, "Shoaling coefficient", "still-water depth [m]", "$K_s$ [-]", legend=True)
 
     ax = axes[1]
-    shore = cfg.bathymetry.shoreline
-    x = np.full(400, 0.5 * (beach.meta.extent[0] + beach.meta.extent[1]))
+    x_shore, shore = scene.shore_ref
+    x = np.full(400, x_shore)
     y = np.linspace(shore - 0.4, max(shore - 40.0 * cfg.lambda_p,
                                      beach.meta.extent[2]), 400)
     depth, _, normal = beach.sample(x, y)
@@ -594,7 +630,7 @@ def fig_nearshore(scene):
 
     x, y = scene.surf_transect()
     nf = nearshore.transform(ts, beach, cfg_on, x, y, 0.0)
-    offshore = cfg.bathymetry.shoreline - y
+    offshore = scene.shore_ref[1] - y
 
     fig, axes = plt.subplots(2, 2, figsize=(11.5, 6.4))
 
@@ -603,8 +639,11 @@ def fig_nearshore(scene):
     ax.plot(offshore, -nf.depth, color="#8a6f4a", lw=2.0)
     ax.axhline(0, color=ACCENT, lw=1.2)
     ax.set_ylim(-1.25 * nf.depth.max(), 0.25 * nf.depth.max())
-    _style(ax, f"Bed profile (Dean, A = {cfg.bathymetry.a:.3f})",
-           "distance offshore [m]", "elevation about $z_w$ [m]")
+    label = (f"Bed profile (Dean, A = {cfg.bathymetry.a:.3f})"
+             if not cfg.bathymetry.is_export
+             else f"Bed profile (measured, foreshore "
+                  f"{100 * scene.bathy.beach_slope():.0f}%)")
+    _style(ax, label, "distance offshore [m]", "elevation about $z_w$ [m]")
 
     ax = axes[0, 1]
     ax.plot(offshore, nf.hs_local, color=ACCENT, lw=2.0, label="$H_s$ local")

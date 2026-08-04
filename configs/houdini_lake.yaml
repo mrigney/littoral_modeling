@@ -1,0 +1,68 @@
+# Houdini terrain -- the first scene running on real exported bathymetry.
+#
+# `bathymetry.source` points at a Phase 4 export, so every synthetic basin key
+# is ignored: the export carries its own grid, extent, water level and EPSG.
+# Measured from that export by `Bathymetry.summary()`:
+#
+#   domain      1024 x 1024 m at 1 m posts, origin (-512, -512)
+#   water       20.5% of the domain, one connected basin, no islands
+#   max depth   23.9 m;  land reaches 75 m above z_w
+#   foreshore   0.316 (32%) at 10 cm depth -- steep, and NOT a Dean beach
+#
+# That last number matters. The synthetic test lake is 6.7% and the cookbook
+# assumes ~5%; at 32% the Iribarren number lands in the plunging regime instead
+# of spilling, and the surf zone narrows to a few tens of centimetres. Run
+# `scripts/run_scene.py` and read summary.md rather than assuming the test
+# lake's numbers carry over.
+#
+# The wind is left at the test lake's 5 m/s so the two scenes differ only in
+# their bathymetry. Change it once you want a different sea state.
+
+scene:
+  domain: [1024.0, 1024.0]      # m -- informational here; the export governs
+  water_level: 100.0            # m, must match grid_meta.json's z_w
+  epsg: 32616
+
+wind:
+  speed: 5.0                    # m/s at 10 m reference
+  direction: 45.0               # deg CCW from +X, direction blowing TOWARD
+  fetch: 1000.0                 # m
+                                # A closed basin has a direction-dependent
+                                # fetch; this is a single representative value.
+
+spectrum:
+  model: jonswap
+  gamma: 3.3
+  spreading: cos2s
+  seed: 20260801
+
+surface:
+  tiles:                        # incommensurate sizes, disjoint bands
+    - {size: 64.0, n: 512, band: [0.0, 0.35]}
+    - {size: 37.0, n: 256, band: [0.35, 0.7]}
+    - {size: 23.0, n: 256, band: [0.7, 1.0]}
+  choppiness: 1.0
+
+bathymetry:
+  source: houdini_export        # relative to the repository root
+  # Everything below is ignored while `source` is set. Left in place so the
+  # file still documents what a synthetic fallback would use.
+  profile: planar
+  shoreline: 400.0
+  dean_a: 0.100
+  max_depth: 5.0
+  dx: 1.0
+  surf_dx: 0.25
+
+nearshore:
+  breaker_index: 0.78
+  foam_halflife: 3.0            # s
+  refraction: true
+  shoaling: true
+
+output:
+  fps: 30.0
+  mesh_dx: 0.25                 # m -- the export is 1 m, but the mesh samples
+                                # it bilinearly and may be finer; 0.25 m keeps a
+                                # useful region affordable.
+  lod_rings: [{r: 100.0, dx: 0.25}, {r: 300.0, dx: 1.0}, {r: 1e9, dx: 4.0}]

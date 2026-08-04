@@ -25,3 +25,13 @@ runs/
 *.ply
 *.npy
 !tests/baseline/*.npy
+
+# Terrain exports. Ignored as a *directory* rather than by extension: `*.npy`
+# alone would leave grid_meta.json tracked on its own, and a half-committed
+# export fails at load with a confusing message rather than being absent.
+#
+# To version one deliberately (it makes the Gate 4 checks run for everyone
+# instead of skipping, at the cost of ~20 MB):
+#     git add -f houdini_export/
+houdini_export/
+*_export/

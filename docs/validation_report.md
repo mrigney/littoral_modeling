@@ -4,12 +4,12 @@
 
 | | |
 |---|---|
-| generated | 2026-08-04 13:15:16 UTC |
-| git_sha | `6e562bcc5bea0236ce82977cba899e84c515644d (working tree dirty)` |
+| generated | 2026-08-04 23:54:52 UTC |
+| git_sha | `4df0a6af8c22ab40c30fb7cb8ac18621027a08f3 (working tree dirty)` |
 | scene | `configs/test_lake.yaml` |
 | python | 3.14.5 (Windows AMD64) |
 | numpy / scipy | 2.5.1 / 1.18.0 |
-| checks recorded | 118 |
+| checks recorded | 124 |
 | exit status | PASS |
 
 Every number below was measured by the test suite against the implementation in this commit. Tolerances are the gate criteria from `littoral-water-implementation-cookbook.md`, except where a deviation is recorded in [Gate deviations](#gate-deviations).
@@ -133,6 +133,26 @@ Notes:
 - **tile baseline sha256 match** -- Bitwise on this platform; the 1e-12 tolerance above is what portability actually requires.
 - **max |difference| vs committed composite baseline** -- 1024 fixed world points, all five fields (h, dx_disp, dy_disp, slope_x, slope_y).
 
+## Gate 4 -- terrain export loading
+
+| Check | Measured | Reference | Rel. error | Tolerance | Result |
+|---|---|---|---|---|---|
+| terrain export round trip, worst field error | 1.1444e-07 m | 0 m | -- | 1.0e-05 | PASS |
+| measured vs analytic foreshore slope (worst) | 0.09591 | 0 | -- | 2.0e-01 | PASS |
+| real export grid | 1024x1024 @ 1.0 m | -- | -- | -- | PASS |
+| real export foreshore slope | 0.31464 | -- | -- | -- | PASS |
+| Iribarren number on the real terrain | 1.4067 | -- | -- | -- | PASS |
+| surf zone width on the real terrain | 0.347622 m | -- | -- | -- | PASS |
+
+Notes:
+
+- **terrain export round trip, worst field error** -- float32 on disk; the contract specifies it, and a millimetre of rounding on a depth field is immaterial.
+- **measured vs analytic foreshore slope (worst)** -- Dean beach, so the analytic answer is exact. dx=1.0: 0.0731 vs 0.0667; dx=0.5: 0.0627 vs 0.0667; dx=0.25: 0.0672 vs 0.0667. Scatter is discretisation; a systematic factor would mean the measurement is measuring the wrong thing.
+- **real export grid** -- extent [-512, 512, -512, 512] m, z_w = 100.0 m, EPSG 32616. Water covers 20.5% of the domain, max depth 23.9 m.
+- **real export foreshore slope** -- Measured from the bed, not assumed. The synthetic test lake is 0.067 and the cookbook assumes ~0.05, so this shore is far steeper and lands in a different breaker regime.
+- **Iribarren number on the real terrain** -- Breaker type: plunging. The synthetic lake gives 0.33 (spilling) on a 6.7% foreshore; this shore is 31% and lands in a different regime.
+- **surf zone width on the real terrain** -- = breaking depth 0.109 m / foreshore slope 0.315. At the export's 1 m posts that is 0.35 cells, so one cell spans 2.9x the breaking depth. Resolving it would need finer bathymetry near the shore.
+
 ## Gate 5 -- nearshore transformation
 
 | Check | Measured | Reference | Rel. error | Tolerance | Result |
@@ -173,7 +193,7 @@ Notes:
 | cold vs sequential, worst per-cell relative error | 0.006144 | 0 | -- | 1.0e-02 | PASS |
 | spin-up steps for 0.5% residual at 30 fps | 688 | -- | -- | -- | PASS |
 | depth from the coarse vs refined grid, 5 m offshore | 3.0543e-04 m | 0 m | -- | 5.0e-02 | PASS |
-| shipped configs that load and build | 2 | -- | -- | -- | PASS |
+| shipped configs that load and build | 3 | -- | -- | -- | PASS |
 | cropped vs parent bathymetry, worst sampling difference | 0 | 0 | -- | 1.0e-12 | PASS |
 
 Notes:
@@ -207,7 +227,7 @@ Notes:
 - **cold vs sequential, worst per-cell relative error** -- Spin-up 92 steps = 23.0 s, initial-condition residual 0.0049. As a fraction of peak coverage the error is 0.121%. The cookbook's suggested 30 frames would leave 79% of the initial condition intact -- the window is set by the half life, not by a frame count.
 - **spin-up steps for 0.5% residual at 30 fps** -- = 22.9 s of simulated time. At the 0.25 s foam step the same window is 92 steps, which is why foam does not sub-step at the frame rate.
 - **depth from the coarse vs refined grid, 5 m offshore** -- Grids are 1 m and 0.25 m; they describe one beach, so a sample must not depend on which is used.
-- **shipped configs that load and build** -- coastal_bay: Hs 1.432 m, Tp 4.75 s; test_lake: Hs 0.085 m, Tp 1.05 s.
+- **shipped configs that load and build** -- coastal_bay: Hs 1.432 m, Tp 4.75 s; houdini_lake: Hs 0.085 m, Tp 1.05 s; test_lake: Hs 0.085 m, Tp 1.05 s.
 - **cropped vs parent bathymetry, worst sampling difference** -- Parent (200, 4000), crop (81, 1001). The crop carries its own origin, so world coordinates are unchanged.
 
 ## Gate 6 -- mesh generation and export
