@@ -4,8 +4,8 @@
 
 | | |
 |---|---|
-| generated | 2026-08-04 04:34:47 UTC |
-| git_sha | `a3e0a789513ba99d38ac03f1361efc4d2f6c4fcd` |
+| generated | 2026-08-04 04:41:36 UTC |
+| git_sha | `3bf447ba0a13546f696ea908c1d6acf68c4c1e2e (working tree dirty)` |
 | scene | `configs/test_lake.yaml` |
 | python | 3.14.5 (Windows AMD64) |
 | numpy / scipy | 2.5.1 / 1.18.0 |
