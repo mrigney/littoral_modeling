@@ -63,7 +63,7 @@ picture went stale.
 
 ```bash
 python scripts/run_scene.py configs/my_scene.yaml --mesh
-python scripts/run_scene.py configs/my_scene.yaml --mesh --mesh-dx 0.25        --mesh-region 400 380 500 405 --mesh-obj
+python scripts/run_scene.py configs/my_scene.yaml --mesh \n       --mesh-dx 0.25 --mesh-region 400 380 500 405 --mesh-t 12.5
 ```
 
 Writes **three things** into `runs/<scene>/mesh/`:
@@ -116,6 +116,20 @@ own header what it dropped.
 GB for one frame. So either coarsen `--mesh-dx` or bound `--mesh-region`;
 bounding the region is what stands in for LOD rings until §6.2 is built. The
 default is a shoreline window of about 900 posts a side.
+
+| Flag | Default | What it does |
+|---|---|---|
+| `--mesh-dx D` | `output.mesh_dx` | Post spacing, metres |
+| `--mesh-region X0 Y0 X1 Y1` | shoreline window | Bound the mesh, scene coordinates |
+| `--mesh-t T` | `0.0` | Scenario time of the frame — free, the surface is a pure function of `t` |
+| `--mesh-obj` | off | Also write an OBJ (no channels) |
+| `--mesh-max-vertices N` | 12,000,000 | Raise the guard on a big machine |
+
+Roughly 50,000 water vertices/s, single-threaded — 10 M vertices is about three
+minutes and 780 MB. More cores will not help (no parallelism in `pywave`) and
+nor will a GPU (no GPU code); a fast card matters for Mitsuba, not for this.
+Full guidance, including a troubleshooting table, is in
+[users_guide.md §16.8](docs/users_guide.md#168-controlling-what-gets-meshed).
 
 ## Watch it move
 

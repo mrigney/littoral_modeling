@@ -30,6 +30,7 @@ spacing). Remaining phases are listed under [Roadmap](#12-roadmap).
 16. [The water mesh](#16-the-water-mesh)
     - [16.6 What is actually in the PLY](#166-what-is-actually-in-the-ply)
     - [16.7 The terrain mesh, and rendering the pair](#167-the-terrain-mesh-and-rendering-the-pair)
+    - [16.8 Controlling what gets meshed](#168-controlling-what-gets-meshed)
 
 > **In a hurry?** [gallery.md](gallery.md) explains the whole model in eight
 > figures.
@@ -1233,12 +1234,65 @@ waterline more closely, at the cost of the slivers section 6.1 says to avoid.
 n = normalize((-slope_x, -slope_y, 1))     # analytic, from the spectral slopes
 ```
 
-Mesh normals are a finite-difference approximation of a field already known
-exactly, and they lose precisely the high-frequency content that matters most
-radiometrically. `WaterMesh.face_normals()` exists **only** as a check — Gate 6
-compares the two and expects them to differ by a few degrees (4.3° mean at
-0.25 m posts). Agreement to machine precision would mean the analytic normals
-had been silently replaced.
+#### How the slopes are obtained
+
+Differentiation in Fourier space is multiplication by `ik`. The surface is a sum
+over modes,
+
+```
+h(x) = sum_k  h~(k) e^{i k.x}
+```
+
+so its derivative is the same sum with each term scaled:
+
+```
+dh/dx = sum_k  (i kx) h~(k) e^{i k.x}
+```
+
+which is one extra inverse FFT, not a difference of neighbouring samples. In
+[`surface.surface_at`](../pywave/surface.py) that is literally three transforms
+of the same spectrum:
+
+```python
+h       = ifft2(ht)              * N**2
+slope_x = ifft2(1j * kx * ht)    * N**2
+slope_y = ifft2(1j * ky * ht)    * N**2
+```
+
+The slopes are therefore **exact for every mode the grid carries** — not
+approximated, not interpolated. Two extra FFTs per frame is the entire cost.
+
+#### Why it matters more than it sounds
+
+A central difference is a low-pass filter, and it attenuates hardest exactly
+where slope variance lives. Slope scales as `k·h`, so the slope spectrum is the
+height spectrum weighted by `k²` — the top of the band dominates, which is
+precisely the part a finite difference destroys.
+
+Measured on one tile at 0.125 m posts:
+
+| | mean square slope | vs band-limited theory |
+|---|---|---|
+| Analytic (spectral) | 0.01906 | +6% |
+| Finite difference of the same heights | 0.01121 | **−38%** |
+
+**Differencing throws away 41% of the slope variance**, and the resulting
+normals differ by 2.8° on average and up to 12°. In a microfacet BSDF that is
+not a cosmetic difference: it feeds straight into roughness, so glint would be
+too tight and too bright, and in LWIR the emissivity error follows.
+
+(The analytic value sits slightly *above* the disc-integrated theory because an
+FFT grid carries modes out to the corners of its k-space square, past the
+Nyquist radius. Expected, and small.)
+
+`TriMesh.face_normals()` exists **only** as a check — Gate 6 compares the two and
+expects them to differ by a few degrees (4.3° mean at 0.25 m posts). Agreement to
+machine precision would mean the analytic normals had been silently replaced by
+geometric ones.
+
+Terrain is the opposite case and uses geometric normals; see
+[16.7](#167-the-terrain-mesh-and-rendering-the-pair) for why that is correct
+there rather than a compromise.
 
 ### 16.4 The per-vertex channels
 
@@ -1555,7 +1609,86 @@ delivery format needs rethinking before any C++ gets written — which is exactl
 why that check is five minutes and comes first. The round-trip test proves the
 data is *in the file*; it cannot prove Mitsuba hands it to a shader.
 
-### 16.8 What Gate 6 checks
+### 16.8 Controlling what gets meshed
+
+Every mesh option is a flag on `run_scene.py`. Nothing needs a code change.
+
+| Flag | Default | What it does |
+|---|---|---|
+| `--mesh` | off | Build and export water + terrain + scene files |
+| `--mesh-dx D` | `output.mesh_dx` from the config | Post spacing in metres |
+| `--mesh-region X0 Y0 X1 Y1` | a shoreline window ~900 posts a side | Bound the mesh in scene coordinates |
+| `--mesh-t T` | `0.0` | Scenario time of the exported frame |
+| `--mesh-obj` | off | Also write an OBJ (geometry only, no channels) |
+| `--mesh-max-vertices N` | 12,000,000 | Raise the guard for a big machine |
+
+```bash
+# the default: a shoreline window at the config's spacing
+python scripts/run_scene.py configs/my_scene.yaml --mesh
+
+# four times the area, same vertex count, at a later moment
+python scripts/run_scene.py configs/my_scene.yaml --mesh \
+       --mesh-dx 0.25 --mesh-region 420 370 540 404 --mesh-t 12.5
+
+# a big machine, a big mesh
+python scripts/run_scene.py configs/my_scene.yaml --mesh \
+       --mesh-dx 0.125 --mesh-region 200 200 800 420 \
+       --mesh-max-vertices 200000000
+```
+
+#### Choosing a region
+
+Scene coordinates, metres, in the same frame as everything else: `X0 Y0 X1 Y1`
+with the waterline at `bathymetry.shoreline` in Y and water at *lower* Y. So a
+region straddling the shoreline wants `Y0` well below it and `Y1` a little
+above.
+
+The refined bathymetry the mesh samples covers a band around the waterline
+rather than the whole domain, and a region outside that band has nothing to
+sample. `summary.md` reports the grid extents if you need to check.
+
+`--mesh-t` is free: the surface is a pure function of time, so frame 12.5 s
+costs exactly what frame 0 costs. Exporting a short sequence is a shell loop,
+not a feature request.
+
+#### Choosing a spacing
+
+Post spacing enters **quadratically**, so it is the strongest lever you have.
+Halving `--mesh-dx` quadruples the vertex count for the same ground area:
+
+| Vertices | Build time | PLY size | Peak RAM |
+|---|---|---|---|
+| 300 k | ~6 s | 23 MB | <1 GB |
+| 10 M | ~3 min | 780 MB | ~4 GB |
+| 50 M | ~17 min | 3.9 GB | ~20 GB |
+| 100 M | ~33 min | 7.8 GB | ~40 GB |
+
+Measured throughput is about **50,000 water vertices/s** and 1.4 M terrain
+vertices/s — terrain is far cheaper because it never samples the wave field.
+
+Two things that will *not* speed this up:
+
+- **More cores.** The build is single-threaded end to end: `map_coordinates`
+  and numpy elementwise work, with no parallelism anywhere in `pywave`. Wall
+  time is the binding constraint, not memory.
+- **A GPU.** There is no GPU code here at all. A fast card matters enormously
+  for Mitsuba (`cuda_ad_rgb`) and not at all for mesh generation.
+
+`max_vertices` exists to catch a plausible typo — the shipped 0.125 m spacing
+over a 1 km domain is 64 M posts, which is easy to ask for by accident. Raise it
+deliberately when you mean it.
+
+#### If something looks wrong
+
+| Symptom | Likely cause |
+|---|---|
+| `exceeds max_vertices` | Coarsen `--mesh-dx` or shrink `--mesh-region`, or raise the guard |
+| `no wet cells in region` | The region misses the water; check `Y0` is below `bathymetry.shoreline` |
+| Mesh is a thin strip | The default region is a shoreline window, not the whole domain — pass `--mesh-region` |
+| Holes at the waterline | Should not happen; Gate 6 asserts full coverage. File it |
+| Mesh smaller than expected | Region is clipped to the refined bathymetry band; widen `bathymetry.surf_dx` coverage or use the coarse grid |
+
+### 16.9 What Gate 6 checks
 
 All of it except the two LOD-ring items, which do not apply:
 

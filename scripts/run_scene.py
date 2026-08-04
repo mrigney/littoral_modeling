@@ -5,6 +5,7 @@
     python scripts/run_scene.py my_scene.yaml --out /tmp/run # somewhere else
     python scripts/run_scene.py my_scene.yaml --quick        # figures only, no data
     python scripts/run_scene.py my_scene.yaml --animate      # add the video clips
+    python scripts/run_scene.py my_scene.yaml --mesh --mesh-t 12.5   # a later frame
 
 Point it at a scene YAML and it produces, in one directory:
 
@@ -390,6 +391,11 @@ def main() -> int:
                          "is usually far too much geometry")
     ap.add_argument("--mesh-obj", action="store_true",
                     help="also write an OBJ (geometry only -- no channels)")
+    ap.add_argument("--mesh-t", type=float, default=0.0,
+                    help="scenario time of the exported frame [s]; the surface "
+                         "is a pure function of t, so any value costs the same")
+    ap.add_argument("--mesh-max-vertices", type=int, default=None,
+                    help="raise the vertex-count guard (default 12,000,000)")
     ap.add_argument("--animate", action="store_true",
                     help="also render the open-water and shoreline clips "
                          "(adds a few minutes)")
@@ -456,9 +462,11 @@ def main() -> int:
         foam_field, _ = scene.foam_field()
         mesh_dir = out / "mesh"
 
+        budget = (args.mesh_max_vertices if args.mesh_max_vertices
+                  else pw_mesh.DEFAULT_MAX_VERTICES)
         wm = pw_mesh.build_water_mesh(
-            scene.tileset, scene.fine_bathy, cfg, t=0.0,
-            dx=args.mesh_dx, region=region,
+            scene.tileset, scene.fine_bathy, cfg, t=args.mesh_t,
+            dx=args.mesh_dx, region=region, max_vertices=budget,
             foam=foam_field, foam_bathy=scene.fine_bathy)
         wstats = wm.validate()
         written = pw_export.export_frame(wm, mesh_dir, "water_0000",
@@ -471,7 +479,8 @@ def main() -> int:
         # something to sit on and nothing shows through at the edges.
         print("building the terrain mesh ...", flush=True)
         tm = pw_mesh.build_terrain_mesh(scene.fine_bathy, cfg, dx=args.mesh_dx,
-                                        region=region, tileset=scene.tileset)
+                                        region=region, tileset=scene.tileset,
+                                        max_vertices=budget)
         tstats = tm.validate()
         written["terrain_ply"] = pw_export.write_ply(
             tm, mesh_dir / "terrain_0000.ply")
