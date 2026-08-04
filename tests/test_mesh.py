@@ -8,6 +8,8 @@ on the format carrying custom attributes.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -468,40 +470,127 @@ def test_terrain_normals_are_geometric_and_gentle(record, terrain, cfg):
     assert np.allclose(implied, slope, atol=1e-5)
 
 
-def test_mitsuba_scene_is_well_formed(record, meshed, terrain, tmp_path):
-    """The starter scene parses as XML and points at both meshes.
+def test_mitsuba_scene_dict_is_the_shape_load_dict_wants(record, meshed, terrain):
+    """The Python-binding form: a dict, built without Mitsuba present.
 
-    It cannot be checked against Mitsuba here -- that is a Phase 7 dependency
-    and is not installed -- so this asserts what can be asserted: that it is
-    valid XML, references both PLYs by name, and carries a roughness taken from
-    the mesh rather than invented.
+    `mitsuba_scene_dict` takes a `transform` hook precisely so the structure can
+    be checked in an environment that has no Mitsuba -- which is this one, since
+    Mitsuba is a Phase 7 dependency.
     """
-    import xml.etree.ElementTree as ET
-
-    from pywave import export as pw_export
-
     water, _, _ = meshed
-    path = pw_export.write_mitsuba_scene(
-        tmp_path / "scene.xml", "water_0000.ply", "terrain_0000.ply",
-        water_mesh=water, terrain_mesh=terrain)
+    params = export.mitsuba_scene_params("water_0000.ply", "terrain_0000.ply",
+                                         water_mesh=water, terrain_mesh=terrain)
 
-    root = ET.parse(path).getroot()
-    assert root.tag == "scene"
-    shapes = {s.get("id"): s for s in root.findall("shape")}
-    assert set(shapes) == {"water", "terrain"}
-    files = {s.get("id"): s.find("string[@name='filename']").get("value")
-             for s in root.findall("shape")}
-    assert files == {"water": "water_0000.ply", "terrain": "terrain_0000.ply"}
-    assert root.find("sensor") is not None
-    assert root.findall("emitter")
+    seen = {}
 
-    alpha = float(shapes["water"].find("bsdf/float[@name='alpha']").get("value"))
+    def fake_transform(origin, target, up):
+        seen.update(origin=origin, target=target, up=up)
+        return "TO_WORLD"
+
+    d = export.mitsuba_scene_dict(params, base_dir="/meshes",
+                                  transform=fake_transform, spp=16)
+
+    assert d["type"] == "scene"
+    assert {"integrator", "sensor", "sky", "sun", "water", "terrain"} <= set(d)
+    assert d["sensor"]["to_world"] == "TO_WORLD"
+    assert d["sensor"]["sampler"]["sample_count"] == 16
+    assert d["water"]["type"] == "ply" and d["terrain"]["type"] == "ply"
+    assert d["water"]["bsdf"]["distribution"] == "beckmann"
+    assert seen["up"] == [0.0, 0.0, 1.0], "scene is Z up, not Mitsuba's default Y up"
+
+    # The camera must stand offshore of the water and above everything.
+    lo, hi = terrain.bounds()
+    assert seen["origin"][1] < lo[1], "camera should sit offshore of the mesh"
+    assert seen["origin"][2] > hi[2], "camera should sit above the terrain"
+
+    alpha = d["water"]["bsdf"]["alpha"]
     expected = float(np.sqrt(np.mean(water.channels["mss"])))
     record("6", "Mitsuba scene Beckmann alpha", alpha, expected, 1e-4,
            note="sqrt of the mean per-vertex mss, baked to a constant because a "
-                "stock BSDF cannot read mesh attributes. Making it spatially "
-                "varying is what the Phase 7 plugin is for. The scene itself is "
-                "UNTESTED against Mitsuba -- not installed here.",
+                "stock BSDF cannot read mesh attributes. Phase 7 reads mss per "
+                "vertex instead. The scene itself is UNTESTED against Mitsuba, "
+                "which is not installed here.",
            passed=abs(alpha - expected) < 1e-4)
     assert abs(alpha - expected) < 1e-4
-    assert "UNTESTED" in path.read_text(encoding="utf-8")
+
+
+def test_mitsuba_scene_params_are_json_serialisable(meshed, terrain):
+    """Params carry no numpy scalars, so the sidecar JSON always writes."""
+    import json
+
+    water, _, _ = meshed
+    params = export.mitsuba_scene_params("w.ply", "t.ply", water_mesh=water,
+                                         terrain_mesh=terrain)
+    round_tripped = json.loads(json.dumps(params))
+    assert round_tripped == params
+    assert isinstance(params["water_alpha"], float)
+
+
+def test_generated_scene_py_runs_without_mitsuba(meshed, terrain, tmp_path,
+                                                 monkeypatch):
+    """`scene.py` imports, builds its dict, and resolves the PLYs next to itself.
+
+    Exercised with a stub in `sys.modules`, so this checks the generated source
+    is valid and self-consistent without needing the real renderer.
+    """
+    import ast
+    import importlib.util
+    import sys
+    import types
+
+    water, _, _ = meshed
+    path = export.write_mitsuba_scene(tmp_path / "scene.py", "water_0000.ply",
+                                      "terrain_0000.ply", water_mesh=water,
+                                      terrain_mesh=terrain)
+    (tmp_path / "water_0000.ply").write_bytes(b"")
+    (tmp_path / "terrain_0000.ply").write_bytes(b"")
+
+    src = path.read_text(encoding="utf-8")
+    ast.parse(src)
+    assert "UNTESTED AGAINST MITSUBA" in src
+    assert (tmp_path / "scene_params.json").exists()
+
+    stub = types.ModuleType("mitsuba")
+
+    class _T:
+        def look_at(self, origin, target, up):
+            return ("lookat", origin, target, up)
+
+    stub.ScalarTransform4f = _T
+    monkeypatch.setitem(sys.modules, "mitsuba", stub)
+
+    spec = importlib.util.spec_from_file_location("generated_scene", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    d = module.scene_dict(spp=8)
+    assert d["sensor"]["sampler"]["sample_count"] == 8
+    for key in ("water", "terrain"):
+        f = Path(d[key]["filename"])
+        assert f.is_absolute() and f.exists(), f"{key} path did not resolve: {f}"
+
+
+def test_mitsuba_xml_is_well_formed(record, meshed, terrain, tmp_path):
+    """The CLI form still parses, and its comment carries no illegal token.
+
+    A doubled hyphen inside an XML comment makes the whole scene unparseable,
+    and prose written with em-dashes produces one very easily. That happened
+    once already, so `write_mitsuba_xml` now refuses to emit it and this asserts
+    the file really does load.
+    """
+    import xml.etree.ElementTree as ET
+
+    water, _, _ = meshed
+    path = export.write_mitsuba_xml(tmp_path / "scene.xml", "water_0000.ply",
+                                    "terrain_0000.ply", water_mesh=water,
+                                    terrain_mesh=terrain)
+    root = ET.parse(path).getroot()
+    assert root.tag == "scene"
+    files = {s.get("id"): s.find("string[@name='filename']").get("value")
+             for s in root.findall("shape")}
+    assert files == {"water": "water_0000.ply", "terrain": "terrain_0000.ply"}
+    assert root.find("sensor") is not None and root.findall("emitter")
+
+    record("6", "Mitsuba XML scene parses", "yes", "yes",
+           note="Both scene forms are generated from one set of parameters, so "
+                "the XML and the Python dict cannot drift apart.")

@@ -72,17 +72,36 @@ Writes **three things** into `runs/<scene>/mesh/`:
 |---|---|
 | `water_0000.ply` | Displaced water surface + per-vertex channels (`mss`, `wdir_x/y`, `aniso`, `depth`, `foam`, `wetness`) |
 | `terrain_0000.ply` | The bed, co-registered with the water and slightly larger |
-| `scene.xml` | A starter Mitsuba 3 scene loading both, camera placed from the mesh bounds |
+| `scene.py` | Starter Mitsuba scene **dict** for `mi.load_dict`, camera placed from the mesh bounds |
+| `scene.xml` | The same scene as XML, for the `mitsuba` CLI |
 
 Plus a JSON sidecar per mesh with the seed, wind, time and git sha that produced
 it. A water mesh on its own is not renderable — nothing to sit on, nothing to
 occlude it at the shoreline — so the terrain comes as standard.
 
-**`scene.xml` is untested against Mitsuba**, which is a Phase 7 dependency and is
-not installed here. It parses as XML and points at both meshes; expect it to need
-a nudge. Its BSDFs are placeholders (diffuse sand, `roughdielectric` with
-Beckmann `alpha = sqrt(mss)` baked to a constant) because stock BSDFs cannot read
-mesh attributes — that is what the Phase 7 plugin is for.
+`scene.py` is the primary form — it hands `mi.load_dict` a dictionary and
+resolves the PLY paths against its own location, so it works from any directory:
+
+```python
+from scene import scene_dict
+import mitsuba as mi
+mi.set_variant("cuda_ad_rgb")
+img = mi.render(mi.load_dict(scene_dict()), spp=256)
+```
+
+```bash
+python scene.py --variant cuda_ad_rgb --spp 256 -o test.exr   # or run it directly
+```
+
+**Both are untested against Mitsuba**, which is a Phase 7 dependency and is not
+installed here. They are generated from one set of parameters so they cannot
+drift apart, and the suite checks the dict's structure and the XML's
+well-formedness — but not that Mitsuba likes either. Expect a nudge.
+
+The BSDFs are placeholders (diffuse sand; `roughdielectric` with Beckmann
+`alpha = sqrt(mean(mss))` baked to a **constant**) because stock BSDFs cannot
+read mesh attributes. The channels are in the PLY and unused — consuming them is
+what the Phase 7 plugin is for.
 
 **PLY, not OBJ.** OBJ has positions, normals and texture coordinates and no
 mechanism for arbitrary per-vertex scalars, so an OBJ carries none of the

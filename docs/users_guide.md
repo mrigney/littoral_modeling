@@ -1446,41 +1446,114 @@ several times rather than trusting the argument.
 
 #### The starter Mitsuba scene
 
-`--mesh` also writes `scene.xml`: a minimal Mitsuba 3 scene loading both PLYs,
-with the camera placed from the meshes' own bounds — offshore, elevated, aimed
-at the waterline — so nobody has to guess coordinates. Scene units are metres
-and Z is up, hence `up="0, 0, 1"` on the `lookat`.
+`--mesh` also writes a scene loading both PLYs, with the camera placed from the
+meshes' own bounds — offshore, elevated, aimed at the waterline — so nobody has
+to guess coordinates. Scene units are metres and Z is up, hence `up = (0, 0, 1)`
+rather than Mitsuba's usual Y-up.
 
-```bash
-mitsuba runs/test_lake/mesh/scene.xml -o test.exr
+Two forms, generated from **one** set of parameters so they cannot drift apart:
+
+**`scene.py`** — the primary form. It hands `mi.load_dict` a dictionary, which is
+what most Mitsuba workflows actually want, and resolves the PLY paths against its
+own location so it works from any working directory.
+
+```python
+from scene import scene_dict
+import mitsuba as mi
+mi.set_variant("cuda_ad_rgb")
+img = mi.render(mi.load_dict(scene_dict()), spp=256)
 ```
 
-**It is untested against Mitsuba.** Mitsuba is a Phase 7 dependency and is not
-installed in this environment, so the XML is written from the documented schema
-and has never been loaded. The test suite asserts it is well-formed XML that
-references both meshes; it cannot assert that Mitsuba likes it. Expect to nudge
-it.
+```bash
+python scene.py --variant cuda_ad_rgb --spp 256 -o test.exr
+```
 
-The BSDFs are placeholders: diffuse sand for the terrain, `roughdielectric` with
-a Beckmann distribution for the water and `alpha = sqrt(mean(mss))` baked to a
-**constant**, because a stock BSDF cannot read mesh attributes. The per-vertex
-channels are in the PLY and simply unused. Making `alpha` spatially varying,
-driving the tangent frame from `wdir`/`aniso`, blending foam by coverage, and
-swapping the dielectric for a complex-IOR reflector in MWIR/LWIR is the entire
-job of the Phase 7 plugin.
+**`scene.xml`** — the same scene for the `mitsuba` command-line tool, which takes
+XML and nothing else.
 
-First thing to run tomorrow, per cookbook 6.6:
+`scene_params.json` carries the same numbers as plain data, for anything that
+would rather not import Python.
+
+From code, the three layers are separable:
+
+```python
+from pywave import export
+
+params = export.mitsuba_scene_params("water.ply", "terrain.ply",
+                                     water_mesh=wm, terrain_mesh=tm)
+d = export.mitsuba_scene_dict(params, base_dir="runs/test_lake/mesh")
+```
+
+`mitsuba_scene_dict` takes an optional `transform` hook — a callable
+`(origin, target, up) -> to_world`. It exists so the dictionary's structure can
+be built and tested without Mitsuba present, which is exactly how the test suite
+exercises it here. **Call `mi.set_variant(...)` before using the default**:
+`mi.ScalarTransform4f` does not exist until a variant is selected.
+
+**Both forms are untested against Mitsuba.** It is a Phase 7 dependency and is
+not installed in this environment, so they are written from the documented schema
+and have never been loaded. The suite asserts the dict's structure and the XML's
+well-formedness; it cannot assert that Mitsuba likes either. Expect a nudge.
+
+> One trap already caught: a doubled hyphen is illegal inside an XML comment, and
+> prose written with em-dashes produces one very easily. It made the whole scene
+> unparseable, with no useful diagnostic from the renderer's side.
+> `write_mitsuba_xml` now refuses to emit one.
+
+#### The placeholder BSDFs, and what replaces them
+
+Diffuse sand for the terrain; `roughdielectric` with a Beckmann distribution for
+the water and `alpha = sqrt(mean(mss))` baked to a **constant**, because a stock
+BSDF cannot read mesh attributes. The per-vertex channels are in the PLY and
+simply unused.
+
+In Phase 7 that constant becomes a per-vertex lookup. Cookbook §7.3 gives the
+mapping explicitly, and warns that a stray √2 here is the likeliest single bug in
+the plugin. Beckmann's slope distribution is Gaussian with per-axis variance
+`α²/2`, so summing both axes gives `mss = α²`:
+
+```
+isotropic     alpha   = sqrt(mss)                 <- read per vertex, not averaged
+anisotropic   alpha_u = sqrt(2 * mss_up)
+              alpha_v = sqrt(2 * mss_cross)
+```
+
+The two channels shipped are sufficient to recover the anisotropic pair, since
+`mss = mss_up + mss_cross` and `aniso = mss_cross / mss_up`:
+
+```
+mss_up    = mss / (1 + aniso)
+mss_cross = mss * aniso / (1 + aniso)
+```
+
+Checked against a direct computation: agreement to 1.2e-5. For the shipped lake
+at 0.125 m posts that is `alpha = 0.1677` isotropic, or
+`alpha_u = 0.1638`, `alpha_v = 0.1714`.
+
+§7.4 adds a trap worth reading before writing the plugin: `alpha_u`/`alpha_v` live
+in the **tangent frame**, which Mitsuba derives from UV parameterisation — and on
+a displaced water mesh the UVs are arbitrary, so the anisotropy axis would rotate
+randomly across the surface and would not follow refraction at all nearshore.
+Build the frame from the `wdir` attribute inside the BSDF and ignore UV tangents
+entirely. That is what `wdir_x`/`wdir_y` are carried for.
+
+Foam blends by coverage, `f = (1 - foam) * f_water + foam * f_foam`, and `depth`
+drives EO bottom visibility.
+
+#### First thing to run
+
+Per cookbook §6.6, before anything else:
 
 ```python
 import mitsuba as mi
 mi.set_variant("scalar_rgb")
-m = mi.load_dict({"type": "ply", "filename": "water_0000.ply"})
-print(mi.traverse(m))        # look for vertex_mss, vertex_foam, ...
+print(mi.traverse(mi.load_dict({"type": "ply", "filename": "water_0000.ply"})))
 ```
 
-If the custom properties are not there, the delivery format needs rethinking
-before any C++ gets written — which is exactly why that check is five minutes
-and comes first.
+Look for `vertex_mss`, `vertex_foam` and the rest. If they are not there, the
+delivery format needs rethinking before any C++ gets written — which is exactly
+why that check is five minutes and comes first. The round-trip test proves the
+data is *in the file*; it cannot prove Mitsuba hands it to a shader.
 
 ### 16.8 What Gate 6 checks
 

@@ -34,7 +34,8 @@ from pathlib import Path
 import numpy as np
 
 __all__ = ["write_ply", "write_obj", "write_frame_metadata", "export_frame",
-           "read_ply", "write_mitsuba_scene"]
+           "read_ply", "mitsuba_scene_params", "mitsuba_scene_dict",
+           "write_mitsuba_scene", "write_mitsuba_xml"]
 
 _PLY_TYPES = {
     np.dtype(np.float32): "float",
@@ -237,136 +238,399 @@ def export_frame(mesh, directory, stem: str = "water", *,
 
 
 # ---------------------------------------------------------------------------
-# A starting scene
+# A starting scene, for Mitsuba's Python bindings
 # ---------------------------------------------------------------------------
+#
+# Built in three layers so none of it needs Mitsuba installed until the moment
+# it is rendered:
+#
+#   mitsuba_scene_params   plain JSON-serialisable numbers -- camera, sun,
+#                          roughness, resolution.  Computable and testable
+#                          anywhere.
+#   mitsuba_scene_dict     those numbers assembled into the structure
+#                          `mi.load_dict` wants.  Needs Mitsuba only to build
+#                          the camera transform.
+#   write_mitsuba_scene    a standalone `scene.py` carrying both, so it can be
+#                          imported by an existing render script or run
+#                          directly.
+#
+# `write_mitsuba_xml` remains for the `mitsuba` command-line tool, which takes
+# XML and nothing else.
 
 
-MITSUBA_HEADER = """<!--
-  Starter Mitsuba 3 scene for a pywave water + terrain pair.
-
-  UNTESTED AGAINST MITSUBA. Mitsuba is a Phase 7 dependency and is not installed
-  in the environment that generated this file, so the XML below is written from
-  the documented schema and has never been loaded. Treat it as a starting point
-  that will probably need a nudge, not as a verified scene.
-
-  Two placeholder BSDFs stand in for Phase 7:
-
-    terrain   diffuse, a flat sand colour
-    water     roughdielectric, Beckmann, alpha = sqrt(mss)
-
-  `alpha` below is the scene mean of the per-vertex `mss` channel, baked to a
-  constant because a stock BSDF cannot read mesh attributes. Making that alpha
-  spatially varying, and swapping the dielectric for a complex-IOR reflector in
-  MWIR/LWIR, is exactly what the Phase 7 plugin is for. The per-vertex channels
-  are in the PLY and are simply unused here.
-
-  Before anything else, confirm Mitsuba actually exposes the custom vertex
-  properties (cookbook 6.6):
-
-      import mitsuba as mi
-      mi.set_variant("scalar_rgb")
-      m = mi.load_dict({"type": "ply", "filename": "%(water_ply)s"})
-      print(mi.traverse(m))          # look for vertex_mss, vertex_foam, ...
-
-  Render:
-
-      mitsuba %(scene_name)s -o test.exr
--->
-"""
-
-
-def write_mitsuba_scene(path, water_ply, terrain_ply, *, water_mesh=None,
-                        terrain_mesh=None, width: int = 1280, height: int = 720,
-                        spp: int = 128, sun_azimuth_deg: float = 135.0,
-                        sun_elevation_deg: float = 35.0) -> Path:
-    """Write a minimal Mitsuba 3 scene loading both PLYs.
+def mitsuba_scene_params(water_ply, terrain_ply, *, water_mesh=None,
+                         terrain_mesh=None, width: int = 1280, height: int = 720,
+                         spp: int = 128, fov: float = 45.0,
+                         sun_azimuth_deg: float = 135.0,
+                         sun_elevation_deg: float = 35.0) -> dict:
+    """Everything the scene needs, as plain numbers.
 
     The camera is placed from the meshes' own bounds -- offshore, elevated,
-    looking back at the waterline -- so it frames the shoreline without anyone
-    having to guess coordinates.  Scene units are metres and Z is up, which is
-    why every ``lookat`` carries ``up="0, 0, 1"``.
+    looking back at the waterline -- so the shoreline is framed without anyone
+    guessing coordinates.  Scene units are metres and Z is up, which is why the
+    camera's ``up`` is ``(0, 0, 1)`` rather than Mitsuba's usual ``(0, 1, 0)``.
     """
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-
     ref = terrain_mesh if terrain_mesh is not None else water_mesh
     if ref is None:
         raise ValueError("pass at least one mesh so the camera can be placed")
+
     lo, hi = ref.bounds()
     cx, cy = 0.5 * (lo[0] + hi[0]), 0.5 * (lo[1] + hi[1])
     span = float(max(hi[0] - lo[0], hi[1] - lo[1]))
 
-    # Water lies at lower Y than the shore, so "offshore" is -Y. Stand back and
+    # Water lies at lower Y than the shore, so "offshore" is -Y.  Stand back and
     # up, and aim a little landward of centre to keep the waterline in frame.
-    target = (cx, cy + 0.15 * span, float(0.5 * (lo[2] + hi[2])))
-    origin = (cx, float(lo[1]) - 0.35 * span, float(hi[2]) + 0.22 * span)
+    target = [float(cx), float(cy + 0.15 * span), float(0.5 * (lo[2] + hi[2]))]
+    origin = [float(cx), float(lo[1] - 0.35 * span), float(hi[2] + 0.22 * span)]
 
     alpha = 0.1
     if water_mesh is not None and "mss" in water_mesh.channels:
         alpha = float(np.sqrt(np.mean(water_mesh.channels["mss"])))
 
-    az = np.radians(sun_azimuth_deg)
-    el = np.radians(sun_elevation_deg)
-    sun = (-np.cos(az) * np.cos(el), -np.sin(az) * np.cos(el), -np.sin(el))
+    az, el = np.radians(sun_azimuth_deg), np.radians(sun_elevation_deg)
+    sun = [float(-np.cos(az) * np.cos(el)), float(-np.sin(az) * np.cos(el)),
+           float(-np.sin(el))]
 
-    header = MITSUBA_HEADER % {"water_ply": Path(water_ply).name,
-                               "scene_name": path.name}
-    # `--` is illegal inside an XML comment, and prose written with em-dashes
-    # slips one in very easily. A malformed comment makes the whole scene
-    # unparseable, which is a baffling failure to debug from Mitsuba's side.
-    body = header[header.index("<!--") + 4:header.index("-->")]
-    if "--" in body:
-        raise ValueError("MITSUBA_HEADER contains '--' inside the XML comment")
-    xml = f"""{header}<scene version="3.0.0">
+    return {
+        "water_ply": Path(water_ply).name,
+        "terrain_ply": Path(terrain_ply).name,
+        "camera": {"origin": origin, "target": target, "up": [0.0, 0.0, 1.0],
+                   "fov": float(fov), "fov_axis": "x"},
+        "film": {"width": int(width), "height": int(height)},
+        "spp": int(spp),
+        "water_alpha": alpha,
+        "water_ior": 1.333,
+        "terrain_reflectance": [0.52, 0.46, 0.35],
+        "sky_radiance": [0.35, 0.45, 0.60],
+        "sun": {"direction": sun, "irradiance": [4.0, 3.8, 3.4],
+                "azimuth_deg": float(sun_azimuth_deg),
+                "elevation_deg": float(sun_elevation_deg)},
+        "max_depth": 12,
+        "note": ("Placeholder BSDFs.  water_alpha is the scene mean of the "
+                 "per-vertex mss channel, baked to a constant because a stock "
+                 "BSDF cannot read mesh attributes; the Phase 7 plugin reads "
+                 "mss per vertex instead."),
+    }
+
+
+def mitsuba_scene_dict(params: dict, *, base_dir=None, transform=None,
+                       spp: int | None = None) -> dict:
+    """Assemble ``params`` into the structure ``mi.load_dict`` accepts.
+
+    Parameters
+    ----------
+    base_dir : directory the PLY filenames are relative to.  Defaults to the
+        current directory, which is rarely what you want -- pass the mesh
+        directory, or use the generated ``scene.py``, which resolves paths
+        against its own location.
+    transform : callable ``(origin, target, up) -> to_world``.  Defaults to
+        ``mi.ScalarTransform4f().look_at``.
+
+    Notes
+    -----
+    **Call ``mi.set_variant(...)`` before this.**  ``mi.ScalarTransform4f`` does
+    not exist until a variant is selected, so building the camera transform
+    fails with a confusing error if the variant is still unset.
+
+    The ``transform`` hook exists so the dictionary's structure can be built and
+    checked without Mitsuba present, which is how this function is tested in an
+    environment that does not have it.
+    """
+    if transform is None:
+        try:
+            import mitsuba as mi
+
+            def transform(o, t, u):
+                return mi.ScalarTransform4f().look_at(origin=o, target=t, up=u)
+        except (ImportError, AttributeError) as exc:
+            raise RuntimeError(
+                "mitsuba is not importable, or no variant has been selected. "
+                "Call mi.set_variant(...) first, or pass transform=... to build "
+                "the camera matrix yourself."
+            ) from exc
+
+    base = Path(base_dir) if base_dir is not None else Path(".")
+    cam = params["camera"]
+
+    return {
+        "type": "scene",
+        "integrator": {"type": "path", "max_depth": params["max_depth"]},
+        "sensor": {
+            "type": "perspective",
+            "fov": cam["fov"],
+            "fov_axis": cam["fov_axis"],
+            "to_world": transform(cam["origin"], cam["target"], cam["up"]),
+            "film": {
+                "type": "hdrfilm",
+                "width": params["film"]["width"],
+                "height": params["film"]["height"],
+            },
+            "sampler": {
+                "type": "independent",
+                "sample_count": int(spp if spp is not None else params["spp"]),
+            },
+        },
+        "sky": {"type": "constant",
+                "radiance": {"type": "rgb", "value": params["sky_radiance"]}},
+        "sun": {"type": "directional",
+                "direction": params["sun"]["direction"],
+                "irradiance": {"type": "rgb",
+                               "value": params["sun"]["irradiance"]}},
+        "terrain": {
+            "type": "ply",
+            "filename": str(base / params["terrain_ply"]),
+            "bsdf": {"type": "diffuse",
+                     "reflectance": {"type": "rgb",
+                                     "value": params["terrain_reflectance"]}},
+        },
+        "water": {
+            "type": "ply",
+            "filename": str(base / params["water_ply"]),
+            "bsdf": {"type": "roughdielectric",
+                     "distribution": "beckmann",
+                     "alpha": params["water_alpha"],
+                     "int_ior": params["water_ior"],
+                     "ext_ior": 1.0},
+        },
+    }
+
+
+_SCENE_PY = '''"""Mitsuba scene for a pywave water + terrain pair.
+
+Generated by `pywave.export.write_mitsuba_scene`.  Regenerate rather than edit.
+
+UNTESTED AGAINST MITSUBA.  Mitsuba is a Phase 7 dependency and was not installed
+in the environment that produced this file, so the dictionary below is written
+from the documented schema and has never been loaded.  Treat it as a starting
+point that will probably need a nudge.
+
+Use it either way round:
+
+    # as a module, from your own render script
+    from scene import scene_dict
+    import mitsuba as mi
+    mi.set_variant("cuda_ad_rgb")
+    img = mi.render(mi.load_dict(scene_dict()), spp=256)
+
+    # or directly
+    python scene.py --variant cuda_ad_rgb --spp 256 -o test.exr
+
+The BSDFs are placeholders.  `water_alpha` is the scene mean of the per-vertex
+`mss` channel, baked to a constant because a stock BSDF cannot read mesh
+attributes.  The PLYs carry mss, wdir_x, wdir_y, aniso, depth, foam and wetness
+per vertex, all currently unused -- consuming them is the Phase 7 plugin's job.
+
+Before anything else, confirm Mitsuba exposes those properties at all
+(cookbook 6.6):
+
+    import mitsuba as mi
+    mi.set_variant("scalar_rgb")
+    print(mi.traverse(mi.load_dict({"type": "ply",
+                                    "filename": "@@WATER_PLY@@"})))
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+
+PARAMS = json.loads(r"""
+@@PARAMS_JSON@@
+""")
+
+
+def scene_dict(spp=None, base_dir=None) -> dict:
+    """The `mi.load_dict` structure.  Call `mi.set_variant(...)` first."""
+    import mitsuba as mi
+
+    cam = PARAMS["camera"]
+    base = Path(base_dir) if base_dir is not None else HERE
+    return {
+        "type": "scene",
+        "integrator": {"type": "path", "max_depth": PARAMS["max_depth"]},
+        "sensor": {
+            "type": "perspective",
+            "fov": cam["fov"],
+            "fov_axis": cam["fov_axis"],
+            "to_world": mi.ScalarTransform4f().look_at(
+                origin=cam["origin"], target=cam["target"], up=cam["up"]),
+            "film": {"type": "hdrfilm",
+                     "width": PARAMS["film"]["width"],
+                     "height": PARAMS["film"]["height"]},
+            "sampler": {"type": "independent",
+                        "sample_count": int(spp or PARAMS["spp"])},
+        },
+        "sky": {"type": "constant",
+                "radiance": {"type": "rgb", "value": PARAMS["sky_radiance"]}},
+        "sun": {"type": "directional",
+                "direction": PARAMS["sun"]["direction"],
+                "irradiance": {"type": "rgb",
+                               "value": PARAMS["sun"]["irradiance"]}},
+        "terrain": {
+            "type": "ply",
+            "filename": str(base / PARAMS["terrain_ply"]),
+            "bsdf": {"type": "diffuse",
+                     "reflectance": {"type": "rgb",
+                                     "value": PARAMS["terrain_reflectance"]}},
+        },
+        "water": {
+            "type": "ply",
+            "filename": str(base / PARAMS["water_ply"]),
+            "bsdf": {"type": "roughdielectric",
+                     "distribution": "beckmann",
+                     "alpha": PARAMS["water_alpha"],
+                     "int_ior": PARAMS["water_ior"],
+                     "ext_ior": 1.0},
+        },
+    }
+
+
+def render(variant: str = "cuda_ad_rgb", spp=None, out: str = "test.exr"):
+    """Load and render.  Falls back to scalar_rgb if the variant is unavailable."""
+    import mitsuba as mi
+
+    try:
+        mi.set_variant(variant)
+    except Exception:
+        print("variant %r unavailable; falling back to scalar_rgb" % variant)
+        mi.set_variant("scalar_rgb")
+
+    scene = mi.load_dict(scene_dict(spp=spp))
+    image = mi.render(scene, spp=int(spp or PARAMS["spp"]))
+    mi.util.write_bitmap(out, image)
+    print("wrote " + out)
+    return image
+
+
+if __name__ == "__main__":
+    import argparse
+
+    ap = argparse.ArgumentParser(description="render the pywave test scene")
+    ap.add_argument("--variant", default="cuda_ad_rgb")
+    ap.add_argument("--spp", type=int, default=None)
+    ap.add_argument("-o", "--out", default="test.exr")
+    a = ap.parse_args()
+    render(a.variant, a.spp, a.out)
+'''
+
+
+def write_mitsuba_scene(path, water_ply, terrain_ply, *, water_mesh=None,
+                        terrain_mesh=None, params: dict | None = None,
+                        **kwargs) -> Path:
+    """Write a standalone ``scene.py`` plus ``scene_params.json``.
+
+    The Python module is the primary artifact: it hands ``mi.load_dict`` a
+    dictionary, which is what most Mitsuba workflows actually want, and it
+    resolves the PLY paths against its own location so it works from any
+    working directory.  The JSON alongside carries the same numbers for anything
+    that would rather not import Python.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    if params is None:
+        params = mitsuba_scene_params(water_ply, terrain_ply,
+                                      water_mesh=water_mesh,
+                                      terrain_mesh=terrain_mesh, **kwargs)
+
+    json_path = path.with_name(path.stem + "_params.json")
+    json_path.write_text(json.dumps(params, indent=2) + "\n", encoding="utf-8")
+
+    # Simple substitution rather than %-formatting or str.format: the template
+    # is Python source and contains both `%` and `{}` in its own right, so any
+    # formatting mini-language would need escaping throughout and would break
+    # the moment someone edited the generated code.
+    body = (_SCENE_PY
+            .replace("@@PARAMS_JSON@@", json.dumps(params, indent=2))
+            .replace("@@WATER_PLY@@", params["water_ply"]))
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def write_mitsuba_xml(path, water_ply, terrain_ply, *, water_mesh=None,
+                      terrain_mesh=None, params: dict | None = None,
+                      **kwargs) -> Path:
+    """Write an XML scene, for the ``mitsuba`` command-line renderer.
+
+    Kept alongside the Python form because the CLI takes XML and nothing else.
+    Same placeholders, same caveats.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if params is None:
+        params = mitsuba_scene_params(water_ply, terrain_ply,
+                                      water_mesh=water_mesh,
+                                      terrain_mesh=terrain_mesh, **kwargs)
+
+    cam, sun = params["camera"], params["sun"]
+    o, t, u = cam["origin"], cam["target"], cam["up"]
+    d = sun["direction"]
+
+    def rgb(v):
+        return ", ".join(str(c) for c in v)
+
+    # NB: `-` doubled is illegal inside an XML comment, so the note avoids it.
+    xml = f"""<!--
+  Starter Mitsuba 3 scene for a pywave water + terrain pair.
+  UNTESTED AGAINST MITSUBA; written from the documented schema, never loaded.
+  Placeholder BSDFs. alpha is the scene mean of the per-vertex mss channel,
+  baked to a constant because a stock BSDF cannot read mesh attributes.
+  Render:  mitsuba {path.name} -o test.exr
+-->
+<scene version="3.0.0">
 
   <integrator type="path">
-    <integer name="max_depth" value="12"/>
+    <integer name="max_depth" value="{params['max_depth']}"/>
   </integrator>
 
   <sensor type="perspective">
-    <string name="fov_axis" value="x"/>
-    <float name="fov" value="45"/>
+    <string name="fov_axis" value="{cam['fov_axis']}"/>
+    <float name="fov" value="{cam['fov']}"/>
     <transform name="to_world">
-      <lookat origin="{origin[0]:.3f}, {origin[1]:.3f}, {origin[2]:.3f}"
-              target="{target[0]:.3f}, {target[1]:.3f}, {target[2]:.3f}"
-              up="0, 0, 1"/>
+      <lookat origin="{o[0]:.3f}, {o[1]:.3f}, {o[2]:.3f}"
+              target="{t[0]:.3f}, {t[1]:.3f}, {t[2]:.3f}"
+              up="{u[0]}, {u[1]}, {u[2]}"/>
     </transform>
     <film type="hdrfilm">
-      <integer name="width" value="{width}"/>
-      <integer name="height" value="{height}"/>
+      <integer name="width" value="{params['film']['width']}"/>
+      <integer name="height" value="{params['film']['height']}"/>
     </film>
     <sampler type="independent">
-      <integer name="sample_count" value="{spp}"/>
+      <integer name="sample_count" value="{params['spp']}"/>
     </sampler>
   </sensor>
 
-  <!-- Sky: flat ambient plus a sun. Swap for an envmap when you have one. -->
   <emitter type="constant">
-    <rgb name="radiance" value="0.35, 0.45, 0.60"/>
+    <rgb name="radiance" value="{rgb(params['sky_radiance'])}"/>
   </emitter>
   <emitter type="directional">
-    <vector name="direction" value="{sun[0]:.4f}, {sun[1]:.4f}, {sun[2]:.4f}"/>
-    <rgb name="irradiance" value="4.0, 3.8, 3.4"/>
+    <vector name="direction" value="{d[0]:.4f}, {d[1]:.4f}, {d[2]:.4f}"/>
+    <rgb name="irradiance" value="{rgb(sun['irradiance'])}"/>
   </emitter>
 
   <shape type="ply" id="terrain">
-    <string name="filename" value="{Path(terrain_ply).name}"/>
+    <string name="filename" value="{params['terrain_ply']}"/>
     <bsdf type="diffuse">
-      <rgb name="reflectance" value="0.52, 0.46, 0.35"/>
+      <rgb name="reflectance" value="{rgb(params['terrain_reflectance'])}"/>
     </bsdf>
   </shape>
 
   <shape type="ply" id="water">
-    <string name="filename" value="{Path(water_ply).name}"/>
+    <string name="filename" value="{params['water_ply']}"/>
     <bsdf type="roughdielectric">
       <string name="distribution" value="beckmann"/>
-      <float name="alpha" value="{alpha:.5f}"/>
-      <float name="int_ior" value="1.333"/>
+      <float name="alpha" value="{params['water_alpha']:.5f}"/>
+      <float name="int_ior" value="{params['water_ior']}"/>
       <float name="ext_ior" value="1.0"/>
     </bsdf>
   </shape>
 
 </scene>
 """
+    body = xml[xml.index("<!--") + 4:xml.index("-->")]
+    if "--" in body:
+        raise ValueError("XML comment contains an illegal double hyphen")
     path.write_text(xml, encoding="utf-8")
     return path

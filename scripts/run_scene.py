@@ -16,7 +16,8 @@ Point it at a scene YAML and it produces, in one directory:
     channels/*.npy      the per-cell nearshore fields, plus a manifest
     mesh/water_0000.ply   displaced water mesh + per-vertex channels  (--mesh)
     mesh/terrain_0000.ply the bed, co-registered with it               (--mesh)
-    mesh/scene.xml        a starter Mitsuba scene loading both         (--mesh)
+    mesh/scene.py         a starter Mitsuba scene dict, loads both     (--mesh)
+    mesh/scene.xml        the same scene as XML, for the CLI           (--mesh)
     open.mp4            open-water animation      (--animate)
     shore.mp4           shoreline animation       (--animate)
 
@@ -481,9 +482,14 @@ def main() -> int:
                 tm, mesh_dir / "terrain_0000.obj", quiet=True)
         print(f"  terrain {tstats['n_vertices']:>9,} v {tstats['n_faces']:>9,} f")
 
-        written["scene_xml"] = pw_export.write_mitsuba_scene(
+        params = pw_export.mitsuba_scene_params(
+            "water_0000.ply", "terrain_0000.ply", water_mesh=wm, terrain_mesh=tm)
+        written["scene_py"] = pw_export.write_mitsuba_scene(
+            mesh_dir / "scene.py", "water_0000.ply", "terrain_0000.ply",
+            params=params)
+        written["scene_xml"] = pw_export.write_mitsuba_xml(
             mesh_dir / "scene.xml", "water_0000.ply", "terrain_0000.ply",
-            water_mesh=wm, terrain_mesh=tm)
+            params=params)
 
         for kind, path in written.items():
             print(f"  {kind:12s} {path.stat().st_size / 1024 / 1024:7.2f} MiB  "
