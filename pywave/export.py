@@ -34,7 +34,7 @@ from pathlib import Path
 import numpy as np
 
 __all__ = ["write_ply", "write_obj", "write_frame_metadata", "export_frame",
-           "read_ply"]
+           "read_ply", "write_mitsuba_scene"]
 
 _PLY_TYPES = {
     np.dtype(np.float32): "float",
@@ -234,3 +234,139 @@ def export_frame(mesh, directory, stem: str = "water", *,
     if obj:
         out["obj"] = write_obj(mesh, directory / f"{stem}.obj", quiet=quiet)
     return out
+
+
+# ---------------------------------------------------------------------------
+# A starting scene
+# ---------------------------------------------------------------------------
+
+
+MITSUBA_HEADER = """<!--
+  Starter Mitsuba 3 scene for a pywave water + terrain pair.
+
+  UNTESTED AGAINST MITSUBA. Mitsuba is a Phase 7 dependency and is not installed
+  in the environment that generated this file, so the XML below is written from
+  the documented schema and has never been loaded. Treat it as a starting point
+  that will probably need a nudge, not as a verified scene.
+
+  Two placeholder BSDFs stand in for Phase 7:
+
+    terrain   diffuse, a flat sand colour
+    water     roughdielectric, Beckmann, alpha = sqrt(mss)
+
+  `alpha` below is the scene mean of the per-vertex `mss` channel, baked to a
+  constant because a stock BSDF cannot read mesh attributes. Making that alpha
+  spatially varying, and swapping the dielectric for a complex-IOR reflector in
+  MWIR/LWIR, is exactly what the Phase 7 plugin is for. The per-vertex channels
+  are in the PLY and are simply unused here.
+
+  Before anything else, confirm Mitsuba actually exposes the custom vertex
+  properties (cookbook 6.6):
+
+      import mitsuba as mi
+      mi.set_variant("scalar_rgb")
+      m = mi.load_dict({"type": "ply", "filename": "%(water_ply)s"})
+      print(mi.traverse(m))          # look for vertex_mss, vertex_foam, ...
+
+  Render:
+
+      mitsuba %(scene_name)s -o test.exr
+-->
+"""
+
+
+def write_mitsuba_scene(path, water_ply, terrain_ply, *, water_mesh=None,
+                        terrain_mesh=None, width: int = 1280, height: int = 720,
+                        spp: int = 128, sun_azimuth_deg: float = 135.0,
+                        sun_elevation_deg: float = 35.0) -> Path:
+    """Write a minimal Mitsuba 3 scene loading both PLYs.
+
+    The camera is placed from the meshes' own bounds -- offshore, elevated,
+    looking back at the waterline -- so it frames the shoreline without anyone
+    having to guess coordinates.  Scene units are metres and Z is up, which is
+    why every ``lookat`` carries ``up="0, 0, 1"``.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    ref = terrain_mesh if terrain_mesh is not None else water_mesh
+    if ref is None:
+        raise ValueError("pass at least one mesh so the camera can be placed")
+    lo, hi = ref.bounds()
+    cx, cy = 0.5 * (lo[0] + hi[0]), 0.5 * (lo[1] + hi[1])
+    span = float(max(hi[0] - lo[0], hi[1] - lo[1]))
+
+    # Water lies at lower Y than the shore, so "offshore" is -Y. Stand back and
+    # up, and aim a little landward of centre to keep the waterline in frame.
+    target = (cx, cy + 0.15 * span, float(0.5 * (lo[2] + hi[2])))
+    origin = (cx, float(lo[1]) - 0.35 * span, float(hi[2]) + 0.22 * span)
+
+    alpha = 0.1
+    if water_mesh is not None and "mss" in water_mesh.channels:
+        alpha = float(np.sqrt(np.mean(water_mesh.channels["mss"])))
+
+    az = np.radians(sun_azimuth_deg)
+    el = np.radians(sun_elevation_deg)
+    sun = (-np.cos(az) * np.cos(el), -np.sin(az) * np.cos(el), -np.sin(el))
+
+    header = MITSUBA_HEADER % {"water_ply": Path(water_ply).name,
+                               "scene_name": path.name}
+    # `--` is illegal inside an XML comment, and prose written with em-dashes
+    # slips one in very easily. A malformed comment makes the whole scene
+    # unparseable, which is a baffling failure to debug from Mitsuba's side.
+    body = header[header.index("<!--") + 4:header.index("-->")]
+    if "--" in body:
+        raise ValueError("MITSUBA_HEADER contains '--' inside the XML comment")
+    xml = f"""{header}<scene version="3.0.0">
+
+  <integrator type="path">
+    <integer name="max_depth" value="12"/>
+  </integrator>
+
+  <sensor type="perspective">
+    <string name="fov_axis" value="x"/>
+    <float name="fov" value="45"/>
+    <transform name="to_world">
+      <lookat origin="{origin[0]:.3f}, {origin[1]:.3f}, {origin[2]:.3f}"
+              target="{target[0]:.3f}, {target[1]:.3f}, {target[2]:.3f}"
+              up="0, 0, 1"/>
+    </transform>
+    <film type="hdrfilm">
+      <integer name="width" value="{width}"/>
+      <integer name="height" value="{height}"/>
+    </film>
+    <sampler type="independent">
+      <integer name="sample_count" value="{spp}"/>
+    </sampler>
+  </sensor>
+
+  <!-- Sky: flat ambient plus a sun. Swap for an envmap when you have one. -->
+  <emitter type="constant">
+    <rgb name="radiance" value="0.35, 0.45, 0.60"/>
+  </emitter>
+  <emitter type="directional">
+    <vector name="direction" value="{sun[0]:.4f}, {sun[1]:.4f}, {sun[2]:.4f}"/>
+    <rgb name="irradiance" value="4.0, 3.8, 3.4"/>
+  </emitter>
+
+  <shape type="ply" id="terrain">
+    <string name="filename" value="{Path(terrain_ply).name}"/>
+    <bsdf type="diffuse">
+      <rgb name="reflectance" value="0.52, 0.46, 0.35"/>
+    </bsdf>
+  </shape>
+
+  <shape type="ply" id="water">
+    <string name="filename" value="{Path(water_ply).name}"/>
+    <bsdf type="roughdielectric">
+      <string name="distribution" value="beckmann"/>
+      <float name="alpha" value="{alpha:.5f}"/>
+      <float name="int_ior" value="1.333"/>
+      <float name="ext_ior" value="1.0"/>
+    </bsdf>
+  </shape>
+
+</scene>
+"""
+    path.write_text(xml, encoding="utf-8")
+    return path

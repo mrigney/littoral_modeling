@@ -4,12 +4,12 @@
 
 | | |
 |---|---|
-| generated | 2026-08-04 04:41:36 UTC |
-| git_sha | `3bf447ba0a13546f696ea908c1d6acf68c4c1e2e (working tree dirty)` |
+| generated | 2026-08-04 04:50:28 UTC |
+| git_sha | `58bf8642616a5bbf5c81958bbdb80ed549deb957 (working tree dirty)` |
 | scene | `configs/test_lake.yaml` |
 | python | 3.14.5 (Windows AMD64) |
 | numpy / scipy | 2.5.1 / 1.18.0 |
-| checks recorded | 111 |
+| checks recorded | 117 |
 | exit status | PASS |
 
 Every number below was measured by the test suite against the implementation in this commit. Tolerances are the gate criteria from `littoral-water-implementation-cookbook.md`, except where a deviation is recorded in [Gate deviations](#gate-deviations).
@@ -229,6 +229,12 @@ Notes:
 | spread of per-vertex wave direction | 38.2809 deg | -- | -- | -- | PASS |
 | PLY round-trip, worst property error | 0 | 0 | -- | 0.0e+00 | PASS |
 | max difference between two builds of the same frame | 0 | 0 | -- | 0.0e+00 | PASS |
+| terrain vertices | 24153 | -- | -- | -- | PASS |
+| terrain min normal z | 0.993225 | -- | -- | -- | PASS |
+| terrain overhang beyond the water mesh | 0.956238 m | -- | -- | -- | PASS |
+| min clearance between water surface and bed | 0.002785 m | -- | -- | -- | PASS |
+| bed slope, median | 1.8359 deg | -- | -- | -- | PASS |
+| Mitsuba scene Beckmann alpha | 0.1983 | 0.1983 | 5.46e-07 | 1.0e-04 | PASS |
 
 Notes:
 
@@ -245,6 +251,12 @@ Notes:
 - **max ‖wave direction‖ - 1** -- Unit by construction; a drift here would tilt the anisotropy frame in Phase 7.
 - **spread of per-vertex wave direction** -- Global wind is 45 deg; the mesh spans 45 to 83 deg as waves refract toward the contours. A constant field would mean refraction never reached the channel.
 - **PLY round-trip, worst property error** -- 13 float properties per vertex: position, normal and 7 channels. Binary little-endian float32, so exact rather than merely close.
+- **terrain vertices** -- 47,616 triangles. Every post is meshed: unlike water, the bed has no extent question.
+- **terrain min normal z** -- A height field cannot overhang, so every normal points up.
+- **terrain overhang beyond the water mesh** -- Water spans x 400.0-460.0, y 380.0-400.2; terrain x 399.0-461.0, y 379.0-403.0. Positive on all four sides.
+- **min clearance between water surface and bed** -- Worst over five times, at t = 0.0 s. Positive because the depth limiter keeps Hs below gamma_b * d.
+- **bed slope, median** -- Range 1.4-6.7 deg. Dean profile with A = 0.100, steepening toward the waterline.
+- **Mitsuba scene Beckmann alpha** -- sqrt of the mean per-vertex mss, baked to a constant because a stock BSDF cannot read mesh attributes. Making it spatially varying is what the Phase 7 plugin is for. The scene itself is UNTESTED against Mitsuba -- not installed here.
 
 ## Gate deviations
 

@@ -66,9 +66,23 @@ python scripts/run_scene.py configs/my_scene.yaml --mesh
 python scripts/run_scene.py configs/my_scene.yaml --mesh --mesh-dx 0.25        --mesh-region 400 380 500 405 --mesh-obj
 ```
 
-Writes a **binary PLY** carrying the per-vertex channels a renderer needs —
-`mss`, `wdir_x/y`, `aniso`, `depth`, `foam`, `wetness` — plus a JSON sidecar with
-the seed, wind, time and git sha that produced it.
+Writes **three things** into `runs/<scene>/mesh/`:
+
+| File | What it is |
+|---|---|
+| `water_0000.ply` | Displaced water surface + per-vertex channels (`mss`, `wdir_x/y`, `aniso`, `depth`, `foam`, `wetness`) |
+| `terrain_0000.ply` | The bed, co-registered with the water and slightly larger |
+| `scene.xml` | A starter Mitsuba 3 scene loading both, camera placed from the mesh bounds |
+
+Plus a JSON sidecar per mesh with the seed, wind, time and git sha that produced
+it. A water mesh on its own is not renderable — nothing to sit on, nothing to
+occlude it at the shoreline — so the terrain comes as standard.
+
+**`scene.xml` is untested against Mitsuba**, which is a Phase 7 dependency and is
+not installed here. It parses as XML and points at both meshes; expect it to need
+a nudge. Its BSDFs are placeholders (diffuse sand, `roughdielectric` with
+Beckmann `alpha = sqrt(mss)` baked to a constant) because stock BSDFs cannot read
+mesh attributes — that is what the Phase 7 plugin is for.
 
 **PLY, not OBJ.** OBJ has positions, normals and texture coordinates and no
 mechanism for arbitrary per-vertex scalars, so an OBJ carries none of the

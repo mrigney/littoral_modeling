@@ -34,7 +34,8 @@ import numpy as np
 
 from .bathymetry import Bathymetry
 
-__all__ = ["WaterMesh", "build_water_mesh", "water_extent_mask", "triangulate_mask"]
+__all__ = ["TriMesh", "WaterMesh", "build_water_mesh", "build_terrain_mesh",
+           "water_extent_mask", "triangulate_mask"]
 
 DEFAULT_MAX_VERTICES = 12_000_000
 
@@ -108,15 +109,20 @@ def triangulate_mask(mask: np.ndarray):
 
 
 @dataclass(frozen=True)
-class WaterMesh:
-    """A displaced water surface with its per-vertex channels."""
+class TriMesh:
+    """A triangle mesh with per-vertex channels.
+
+    Used for both the water surface and the bed. They differ in where the
+    normals come from -- analytic for water, geometric for terrain -- but the
+    container and the export path are the same.
+    """
 
     vertices: np.ndarray
-    """``(V, 3)`` float32 displaced positions [m], scene coordinates, Z up."""
+    """``(V, 3)`` float32 positions [m], scene coordinates, Z up."""
     faces: np.ndarray
     """``(F, 3)`` int32 triangle indices."""
     normals: np.ndarray
-    """``(V, 3)`` float32 analytic normals from the spectral slopes."""
+    """``(V, 3)`` float32 unit normals."""
     channels: dict[str, np.ndarray] = field(default_factory=dict)
     """Per-vertex float32 channels; see the section 0.4 contract."""
     meta: dict = field(default_factory=dict)
@@ -180,6 +186,10 @@ class WaterMesh:
         return {"n_vertices": self.n_vertices, "n_faces": self.n_faces,
                 "normal_unit_error": worst,
                 "min_normal_z": float(self.normals[:, 2].min()) if self.normals.size else 1.0}
+
+
+WaterMesh = TriMesh
+"""Backwards-compatible alias; the container was never water-specific."""
 
 
 def build_water_mesh(
@@ -308,3 +318,125 @@ def _swash_margin(tileset, bathy, cfg) -> float:
     hs = tileset.hs()
     xi = nearshore.iribarren_number(slope, hs, l0)
     return float(nearshore.swash_width(nearshore.hunt_runup(xi, hs), slope))
+
+
+# ---------------------------------------------------------------------------
+# Terrain
+# ---------------------------------------------------------------------------
+
+
+def build_terrain_mesh(
+    bathy: Bathymetry,
+    cfg,
+    *,
+    dx: float | None = None,
+    region: tuple[float, float, float, float] | None = None,
+    pad: float | None = None,
+    tileset=None,
+    max_vertices: int = DEFAULT_MAX_VERTICES,
+) -> TriMesh:
+    """Mesh the bed, co-registered with the water mesh.
+
+    A water mesh on its own is not renderable: it has nothing to sit on, nothing
+    to occlude it at the shoreline, and no bottom to see through in EO.  This
+    builds the matching terrain over the same region, in the same coordinates,
+    so the two PLYs drop into a scene together.
+
+    Parameters
+    ----------
+    region : the water mesh's region. Pass the same tuple.
+    pad : extra terrain beyond ``region`` on every side [m]. Defaults to four
+        posts, so the bed extends slightly past the water and no sliver of
+        background shows through at the edge.
+    tileset : optional; only used to size the swash band for the ``wetness``
+        channel. Without it, wetness is omitted rather than guessed.
+
+    Normals here are geometric, and that is correct
+    ----------------------------------------------
+    The water mesh takes its normals from the analytic spectral slopes, because
+    for water the field *is* known exactly and differencing it would throw away
+    the high-frequency content that matters most (cookbook 6.3).  The bed is the
+    opposite case: it only exists as a sampled grid -- the shoreline comes from
+    a Euclidean distance transform, not a closed form -- so there is no analytic
+    slope to prefer, and a central difference of the height field is the honest
+    answer rather than a compromise.
+
+    Co-registration, which is the whole point
+    ----------------------------------------
+    Both meshes are built from the same bathymetry on the same world grid, so a
+    post at ``(x, y)`` means the same place in both.  Where the water mesh runs
+    landward of the waterline it sits at the still-water level and the bed rises
+    above it, so the water is hidden rather than z-fighting.  Offshore, the
+    depth-limited breaking criterion keeps the wave trough above the bed: with
+    ``Hs <= gamma_b d`` the elevation stays inside roughly ``+/- 0.6 d``, so the
+    surface cannot punch through the bottom in shallow water.  That is asserted
+    in the tests rather than assumed.
+    """
+    dx = float(dx if dx is not None else cfg.output.mesh_dx)
+    if dx <= 0:
+        raise ValueError(f"mesh spacing must be positive, got {dx}")
+    if pad is None:
+        pad = 4.0 * dx
+
+    x0b, x1b, y0b, y1b = bathy.meta.extent
+    if region is None:
+        x0, y0, x1, y1 = x0b, y0b, x1b, y1b
+    else:
+        x0, y0, x1, y1 = (float(v) for v in region)
+        x0, y0 = max(x0 - pad, x0b), max(y0 - pad, y0b)
+        x1, y1 = min(x1 + pad, x1b), min(y1 + pad, y1b)
+    if x1 <= x0 or y1 <= y0:
+        raise ValueError(f"empty terrain region {(x0, y0, x1, y1)}")
+
+    nx = max(int(np.floor((x1 - x0) / dx)) + 1, 2)
+    ny = max(int(np.floor((y1 - y0) / dx)) + 1, 2)
+    if nx * ny > max_vertices:
+        raise ValueError(
+            f"terrain {nx} x {ny} = {nx * ny:,} posts exceeds max_vertices="
+            f"{max_vertices:,}; coarsen dx or shrink the region")
+
+    xs = x0 + np.arange(nx) * dx
+    ys = y0 + np.arange(ny) * dx
+    X, Y = np.meshgrid(xs, ys, indexing="xy")
+
+    depth, sdf, _ = bathy.sample(X, Y)
+    z = cfg.scene.water_level - depth
+
+    # Every post is meshed: unlike water, the bed has no extent question.
+    mask = np.ones(depth.shape, dtype=bool)
+    _, faces = triangulate_mask(mask)
+
+    # Central differences of the height field. np.gradient returns d/dy first
+    # for [y, x] indexing.
+    dzdy, dzdx = np.gradient(z, dx)
+    n = np.stack([-dzdx, -dzdy, np.ones_like(z)], axis=-1)
+    n /= np.linalg.norm(n, axis=-1, keepdims=True)
+
+    channels = {
+        "depth": depth.ravel().astype(np.float32),
+        "sdf": sdf.ravel().astype(np.float32),
+        "slope": np.hypot(dzdx, dzdy).ravel().astype(np.float32),
+    }
+    if tileset is not None:
+        from . import nearshore
+
+        band = _swash_margin(tileset, bathy, cfg)
+        channels["wetness"] = nearshore.wetness_fraction(
+            sdf, band).ravel().astype(np.float32)
+
+    vertices = np.stack([X.ravel(), Y.ravel(), z.ravel()], axis=1).astype(np.float32)
+    meta = {
+        "kind": "terrain",
+        "mesh_dx": dx,
+        "region": [x0, y0, x1, y1],
+        "grid": [int(ny), int(nx)],
+        "pad": float(pad),
+        "water_level": float(cfg.scene.water_level),
+        "dean_A": float(cfg.bathymetry.a),
+        "profile": cfg.bathymetry.profile,
+        "scene": cfg.name,
+        "epsg": int(cfg.scene.epsg),
+    }
+    return TriMesh(vertices=vertices, faces=faces,
+                   normals=n.reshape(-1, 3).astype(np.float32),
+                   channels=channels, meta=meta)

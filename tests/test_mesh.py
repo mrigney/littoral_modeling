@@ -378,3 +378,130 @@ def test_triangulation_requires_all_four_corners():
     m[2, 2] = False                       # break a corner
     _, faces = mesh.triangulate_mask(m)
     assert faces.shape == (0, 3)
+
+
+# ---------------------------------------------------------------------------
+# Terrain, and the pair
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def terrain(cfg, meshed):
+    """The bed over the same region as the water mesh."""
+    _, ts, bathy = meshed
+    return mesh.build_terrain_mesh(bathy, cfg, dx=DX, region=REGION, tileset=ts)
+
+
+def test_terrain_mesh_is_structurally_sound(record, terrain, cfg):
+    """Finite, unit normals, upward-facing -- it is a height field."""
+    stats = terrain.validate()
+    record("6", "terrain vertices", stats["n_vertices"],
+           note=f"{stats['n_faces']:,} triangles. Every post is meshed: unlike "
+                f"water, the bed has no extent question.")
+    record("6", "terrain min normal z", stats["min_normal_z"],
+           note="A height field cannot overhang, so every normal points up.",
+           passed=stats["min_normal_z"] > 0.0)
+    assert stats["min_normal_z"] > 0.0
+    assert set(terrain.channels) >= {"depth", "sdf", "slope"}
+
+
+def test_terrain_encloses_the_water_mesh(record, meshed, terrain):
+    """The bed must extend past the water, or background shows through the edge."""
+    water, _, _ = meshed
+    wlo, whi = water.bounds()
+    tlo, thi = terrain.bounds()
+
+    slack = min(float(wlo[0] - tlo[0]), float(wlo[1] - tlo[1]),
+                float(thi[0] - whi[0]), float(thi[1] - whi[1]))
+    record("6", "terrain overhang beyond the water mesh", slack, unit="m",
+           note=f"Water spans x {wlo[0]:.1f}-{whi[0]:.1f}, y {wlo[1]:.1f}-"
+                f"{whi[1]:.1f}; terrain x {tlo[0]:.1f}-{thi[0]:.1f}, y "
+                f"{tlo[1]:.1f}-{thi[1]:.1f}. Positive on all four sides.",
+           passed=slack > 0.0)
+    assert slack > 0.0
+
+
+def test_water_never_punches_through_the_bed(record, meshed, cfg):
+    """The wave trough stays above the bottom, at every time.
+
+    Not a coincidence: the depth-limited breaking criterion caps `Hs` at
+    `gamma_b * d`, so the elevation standard deviation is `0.195 d` and a three
+    sigma trough is `0.6 d` -- comfortably inside the depth. Without the limiter
+    the shoaling gain would drive the surface straight through the bed in the
+    last few centimetres.
+    """
+    from pywave import tiling
+
+    ts = tiling.TileSet.build(cfg)
+    bathy = Bathymetry.from_config(cfg, fine=True)
+
+    worst, worst_t = np.inf, None
+    for t in (0.0, 0.7, 1.25, 2.6, 4.1):
+        m = mesh.build_water_mesh(ts, bathy, cfg, t=t, dx=DX, region=REGION)
+        d = m.channels["depth"]
+        wet = d > 0.0
+        bed_z = cfg.scene.water_level - d[wet]
+        clearance = float((m.vertices[wet, 2] - bed_z).min())
+        if clearance < worst:
+            worst, worst_t = clearance, t
+
+    record("6", "min clearance between water surface and bed", worst, unit="m",
+           note=f"Worst over five times, at t = {worst_t} s. Positive because "
+                f"the depth limiter keeps Hs below gamma_b * d.",
+           passed=worst > 0.0)
+    assert worst > 0.0
+
+
+def test_terrain_normals_are_geometric_and_gentle(record, terrain, cfg):
+    """The bed's normals come from its own gradient, and the slope is plausible."""
+    slope = terrain.channels["slope"]
+    tilt = np.degrees(np.arctan(slope))
+    record("6", "bed slope, median", float(np.median(tilt)), unit="deg",
+           note=f"Range {tilt.min():.1f}-{tilt.max():.1f} deg. Dean profile with "
+                f"A = {cfg.bathymetry.a:.3f}, steepening toward the waterline.",
+           passed=bool(tilt.max() < 60.0))
+    assert np.all(slope >= 0.0)
+    assert tilt.max() < 60.0
+
+    # Normals must agree with the slope channel they were built from.
+    implied = np.hypot(terrain.normals[:, 0], terrain.normals[:, 1]) / terrain.normals[:, 2]
+    assert np.allclose(implied, slope, atol=1e-5)
+
+
+def test_mitsuba_scene_is_well_formed(record, meshed, terrain, tmp_path):
+    """The starter scene parses as XML and points at both meshes.
+
+    It cannot be checked against Mitsuba here -- that is a Phase 7 dependency
+    and is not installed -- so this asserts what can be asserted: that it is
+    valid XML, references both PLYs by name, and carries a roughness taken from
+    the mesh rather than invented.
+    """
+    import xml.etree.ElementTree as ET
+
+    from pywave import export as pw_export
+
+    water, _, _ = meshed
+    path = pw_export.write_mitsuba_scene(
+        tmp_path / "scene.xml", "water_0000.ply", "terrain_0000.ply",
+        water_mesh=water, terrain_mesh=terrain)
+
+    root = ET.parse(path).getroot()
+    assert root.tag == "scene"
+    shapes = {s.get("id"): s for s in root.findall("shape")}
+    assert set(shapes) == {"water", "terrain"}
+    files = {s.get("id"): s.find("string[@name='filename']").get("value")
+             for s in root.findall("shape")}
+    assert files == {"water": "water_0000.ply", "terrain": "terrain_0000.ply"}
+    assert root.find("sensor") is not None
+    assert root.findall("emitter")
+
+    alpha = float(shapes["water"].find("bsdf/float[@name='alpha']").get("value"))
+    expected = float(np.sqrt(np.mean(water.channels["mss"])))
+    record("6", "Mitsuba scene Beckmann alpha", alpha, expected, 1e-4,
+           note="sqrt of the mean per-vertex mss, baked to a constant because a "
+                "stock BSDF cannot read mesh attributes. Making it spatially "
+                "varying is what the Phase 7 plugin is for. The scene itself is "
+                "UNTESTED against Mitsuba -- not installed here.",
+           passed=abs(alpha - expected) < 1e-4)
+    assert abs(alpha - expected) < 1e-4
+    assert "UNTESTED" in path.read_text(encoding="utf-8")

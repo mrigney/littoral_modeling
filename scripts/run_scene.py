@@ -14,7 +14,9 @@ Point it at a scene YAML and it produces, in one directory:
     overview.html       one self-contained page you can mail to someone
     figures/*.png       eight figures
     channels/*.npy      the per-cell nearshore fields, plus a manifest
-    mesh/water_0000.ply displaced mesh with per-vertex channels  (--mesh)
+    mesh/water_0000.ply   displaced water mesh + per-vertex channels  (--mesh)
+    mesh/terrain_0000.ply the bed, co-registered with it               (--mesh)
+    mesh/scene.xml        a starter Mitsuba scene loading both         (--mesh)
     open.mp4            open-water animation      (--animate)
     shore.mp4           shoreline animation       (--animate)
 
@@ -269,7 +271,7 @@ def write_summary_md(summary: dict, path: Path) -> None:
         "| `figures/` | Eight PNGs at 150 dpi. |",
         "| `channels/` | Per-cell nearshore fields as `.npy`, with `manifest.json`. |",
         "| `summary.json` | Everything in this report, machine-readable. |",
-        "| `mesh/` | Displaced PLY with per-vertex channels, if `--mesh` was passed. |",
+        "| `mesh/` | Water + terrain PLYs and a starter Mitsuba scene, if `--mesh` was passed. |",
         "| `open.*` / `shore.*` | Animations, if `--animate` was passed. |",
         "",
     ]
@@ -451,18 +453,40 @@ def main() -> int:
         print("building the water mesh ...", flush=True)
         region = tuple(args.mesh_region) if args.mesh_region else _default_region(scene)
         foam_field, _ = scene.foam_field()
+        mesh_dir = out / "mesh"
+
         wm = pw_mesh.build_water_mesh(
             scene.tileset, scene.fine_bathy, cfg, t=0.0,
             dx=args.mesh_dx, region=region,
             foam=foam_field, foam_bathy=scene.fine_bathy)
-        stats = wm.validate()
-        written = pw_export.export_frame(wm, out / "mesh", "water_0000",
+        wstats = wm.validate()
+        written = pw_export.export_frame(wm, mesh_dir, "water_0000",
                                          obj=args.mesh_obj)
-        print(f"  {stats['n_vertices']:,} vertices, {stats['n_faces']:,} faces "
+        print(f"  water   {wstats['n_vertices']:>9,} v {wstats['n_faces']:>9,} f "
               f"at {wm.meta['mesh_dx']:g} m over "
               f"{region[2] - region[0]:.0f} x {region[3] - region[1]:.0f} m")
+
+        # The bed, on the same grid and slightly larger, so the water has
+        # something to sit on and nothing shows through at the edges.
+        print("building the terrain mesh ...", flush=True)
+        tm = pw_mesh.build_terrain_mesh(scene.fine_bathy, cfg, dx=args.mesh_dx,
+                                        region=region, tileset=scene.tileset)
+        tstats = tm.validate()
+        written["terrain_ply"] = pw_export.write_ply(
+            tm, mesh_dir / "terrain_0000.ply")
+        written["terrain_json"] = pw_export.write_frame_metadata(
+            tm, mesh_dir / "terrain_0000.json")
+        if args.mesh_obj:
+            written["terrain_obj"] = pw_export.write_obj(
+                tm, mesh_dir / "terrain_0000.obj", quiet=True)
+        print(f"  terrain {tstats['n_vertices']:>9,} v {tstats['n_faces']:>9,} f")
+
+        written["scene_xml"] = pw_export.write_mitsuba_scene(
+            mesh_dir / "scene.xml", "water_0000.ply", "terrain_0000.ply",
+            water_mesh=wm, terrain_mesh=tm)
+
         for kind, path in written.items():
-            print(f"  {kind:4s} {path.stat().st_size / 1024 / 1024:6.2f} MiB  "
+            print(f"  {kind:12s} {path.stat().st_size / 1024 / 1024:7.2f} MiB  "
                   f"{path.name}")
 
     if args.animate:

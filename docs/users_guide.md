@@ -29,6 +29,7 @@ spacing). Remaining phases are listed under [Roadmap](#12-roadmap).
 15. [Running a scene end to end](#15-running-a-scene-end-to-end)
 16. [The water mesh](#16-the-water-mesh)
     - [16.6 What is actually in the PLY](#166-what-is-actually-in-the-ply)
+    - [16.7 The terrain mesh, and rendering the pair](#167-the-terrain-mesh-and-rendering-the-pair)
 
 > **In a hurry?** [gallery.md](gallery.md) explains the whole model in eight
 > figures.
@@ -1403,7 +1404,85 @@ delivery format needs rethinking before any C++ is written. The round-trip test
 here proves the data is *in the file*; it cannot prove Mitsuba hands it to a
 shader.
 
-### 16.7 What Gate 6 checks
+### 16.7 The terrain mesh, and rendering the pair
+
+A water mesh alone is not renderable: nothing to sit on, nothing to occlude it
+at the shoreline, no bottom to see through in EO. `--mesh` therefore emits both.
+
+```python
+from pywave import mesh
+
+water   = mesh.build_water_mesh(ts, bathy, cfg, t=0.0, dx=0.125, region=R)
+terrain = mesh.build_terrain_mesh(bathy, cfg, dx=0.125, region=R, tileset=ts)
+```
+
+Both are built from the same bathymetry on the same world grid, so a post at
+`(x, y)` means the same place in both. The terrain is padded four posts beyond
+the water region so no sliver of background shows through at the edge.
+
+Terrain channels are `depth`, `sdf`, `slope`, and `wetness` when a tileset is
+supplied to size the swash band. There is no `bottom_type` yet — that is a
+Phase 4 field.
+
+**Terrain normals are geometric, and that is correct.** The water mesh takes its
+normals from the analytic spectral slopes because for water the field *is* known
+exactly. The bed is the opposite case: it only exists as a sampled grid — its
+shoreline comes from a Euclidean distance transform, not a closed form — so
+there is no analytic slope to prefer, and a central difference of the height
+field is the honest answer rather than a compromise.
+
+#### Why the water never punches through the bed
+
+Where the water mesh runs landward of the waterline it sits at the still-water
+level and the bed rises above it, so the water is hidden rather than z-fighting.
+Offshore, the depth-limited breaking criterion does the work: with
+`Hs <= gamma_b * d` the elevation standard deviation is `0.195 d`, so even a
+three-sigma trough is `0.6 d` — comfortably inside the depth. Measured minimum
+clearance on the shipped scene is **+2.8 mm**, at a vertex in 7.5 mm of water.
+
+Without the limiter the shoaling gain would drive the surface straight through
+the bottom in the last few centimetres. Gate 6 asserts the clearance across
+several times rather than trusting the argument.
+
+#### The starter Mitsuba scene
+
+`--mesh` also writes `scene.xml`: a minimal Mitsuba 3 scene loading both PLYs,
+with the camera placed from the meshes' own bounds — offshore, elevated, aimed
+at the waterline — so nobody has to guess coordinates. Scene units are metres
+and Z is up, hence `up="0, 0, 1"` on the `lookat`.
+
+```bash
+mitsuba runs/test_lake/mesh/scene.xml -o test.exr
+```
+
+**It is untested against Mitsuba.** Mitsuba is a Phase 7 dependency and is not
+installed in this environment, so the XML is written from the documented schema
+and has never been loaded. The test suite asserts it is well-formed XML that
+references both meshes; it cannot assert that Mitsuba likes it. Expect to nudge
+it.
+
+The BSDFs are placeholders: diffuse sand for the terrain, `roughdielectric` with
+a Beckmann distribution for the water and `alpha = sqrt(mean(mss))` baked to a
+**constant**, because a stock BSDF cannot read mesh attributes. The per-vertex
+channels are in the PLY and simply unused. Making `alpha` spatially varying,
+driving the tangent frame from `wdir`/`aniso`, blending foam by coverage, and
+swapping the dielectric for a complex-IOR reflector in MWIR/LWIR is the entire
+job of the Phase 7 plugin.
+
+First thing to run tomorrow, per cookbook 6.6:
+
+```python
+import mitsuba as mi
+mi.set_variant("scalar_rgb")
+m = mi.load_dict({"type": "ply", "filename": "water_0000.ply"})
+print(mi.traverse(m))        # look for vertex_mss, vertex_foam, ...
+```
+
+If the custom properties are not there, the delivery format needs rethinking
+before any C++ gets written — which is exactly why that check is five minutes
+and comes first.
+
+### 16.8 What Gate 6 checks
 
 All of it except the two LOD-ring items, which do not apply:
 
