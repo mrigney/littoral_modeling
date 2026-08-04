@@ -4,8 +4,9 @@ Spectral water surface synthesis for physics-based EO/IR littoral scene generati
 
 This guide covers everything currently implemented: **Phase 1** (spectrum and
 moments), **Phase 2** (FFT surface synthesis and tiling), **Phase 3** (the
-validation suite), and **Phase 5** (nearshore transformation, built against a
-synthetic beach). Remaining phases are listed under [Roadmap](#12-roadmap).
+validation suite), **Phase 5** (nearshore transformation, built against a
+synthetic beach) and **Phase 6** (mesh generation and export, at constant post
+spacing). Remaining phases are listed under [Roadmap](#12-roadmap).
 
 ---
 
@@ -26,6 +27,7 @@ synthetic beach). Remaining phases are listed under [Roadmap](#12-roadmap).
 13. [Validating a build](#13-validating-a-build)
 14. [The nearshore](#14-the-nearshore)
 15. [Running a scene end to end](#15-running-a-scene-end-to-end)
+16. [The water mesh](#16-the-water-mesh)
 
 > **In a hurry?** [gallery.md](gallery.md) explains the whole model in eight
 > figures.
@@ -63,11 +65,13 @@ independently.
 | Shoaling, Snell refraction, depth-limited breaking | `nearshore.transform` |
 | Swash wetness as a duty cycle, for the thermal channel | `nearshore.wetness_fraction` |
 | Foam with bounded, reproducible spin-up | `foam.FoamModel` |
+| Displaced water mesh with per-vertex channels | `mesh.build_water_mesh` |
+| Binary PLY export that survives into Mitsuba | `export.write_ply` |
 
 ### What it does not do yet
 
 No terrain import (Phase 4 — `bathymetry.py` supplies a synthetic stand-in), no
-mesh export, no BSDF, no emissivity, no EMBER integration. See
+LOD rings (§6.2), no BSDF, no emissivity, no EMBER integration. See
 [Roadmap](#12-roadmap).
 
 ---
@@ -766,7 +770,7 @@ Project-internal: `water-surface-modeling-primer.md` (the physics rationale) and
 | 3 | `tests/`, `docs/validation_report.md` | **Implemented** — 72 checks, see [Validating a build](#13-validating-a-build) |
 | 4 | Terrain and lake basin in Houdini | Not started — `bathymetry.py` stands in |
 | 5 | `nearshore.py`, `foam.py` — shoaling, refraction, breaking | **Implemented** — see [The nearshore](#14-the-nearshore) |
-| 6 | `mesh.py`, `channels.py`, `export.py` — displaced mesh, LOD | Not started |
+| 6 | `mesh.py`, `channels.py`, `export.py` | **Implemented** — constant spacing; §6.2 LOD rings deferred. See [The water mesh](#16-the-water-mesh) |
 | 7 | Mitsuba `roughwater` BSDF plugin | Not started |
 | 8 | Emissivity table | Not started |
 | 9 | EMBER integration | Not started |
@@ -1156,3 +1160,153 @@ clip shows a thin wet band and a modest white line, because that is what such a
 lake does. `coastal_bay.yaml` — 1.43 m waves, a 48.6 m surf zone, plunging
 breakers — is the scene to look at if you want to see the nearshore model
 working hard.
+
+---
+
+## 16. The water mesh
+
+Phase 6 turns the surface into geometry: a grid of posts over the wet area,
+displaced by the wave field, carrying the per-vertex channels a renderer needs.
+
+```bash
+python scripts/run_scene.py configs/my_scene.yaml --mesh
+```
+
+```python
+from pywave import mesh, export, tiling, load_config
+from pywave.bathymetry import Bathymetry
+
+cfg   = load_config("configs/test_lake.yaml")
+ts    = tiling.TileSet.build(cfg)
+bathy = Bathymetry.from_config(cfg, fine=True)
+
+m = mesh.build_water_mesh(ts, bathy, cfg, t=1.25,
+                          dx=0.125, region=(444.0, 360.0, 556.0, 410.0))
+m.validate()
+export.export_frame(m, "out/", "water_0000")     # PLY + JSON sidecar
+```
+
+### 16.1 Constant post spacing, deliberately
+
+Section 6.2 specifies concentric LOD rings, each with its own spacing, stitched
+at the boundaries. **That is not implemented.** This meshes at one spacing
+everywhere, which makes the geometry trivial — a regular grid triangulates into
+two triangles per cell with no seams to stitch and no transition rows to get
+wrong — and collapses the LOD invariant from per-vertex bookkeeping into one
+global check.
+
+The cost is vertex count, and **spacing enters quadratically**:
+
+| Spacing | Posts over 1 km² | Rough PLY size |
+|---|---|---|
+| 0.125 m | 64,000,000 | ~5 GB |
+| 0.25 m | 16,000,000 | ~1.2 GB |
+| 0.5 m | 4,000,000 | ~300 MB |
+| 1.0 m | 1,000,000 | ~75 MB |
+
+So either coarsen the spacing or bound the region. **Bounding the region is what
+stands in for LOD rings** until 6.2 exists — mesh the shoreline window you
+actually care about at a fine spacing, rather than the whole lake. The default
+region is a shoreline window about 900 posts a side. `max_vertices` refuses
+rather than swapping the machine to death.
+
+### 16.2 Water extent
+
+Meshed where `depth > 0.02 m`, then dilated landward by the swash excursion.
+
+Trimming at a small positive depth rather than exactly zero is not fussiness:
+the band around `depth = 0` is where a depth-thresholded mesh goes slivery and
+where it z-fights against the terrain it sits on. Cutting at 2 cm and dilating
+gives a clean edge that still covers the swash. Onshore vertices end up *below*
+the bed, so the water is hidden rather than fighting for pixels — there is a
+test asserting exactly that.
+
+A cell becomes two triangles only when **all four** of its corners are wet.
+Emitting a triangle whenever any three corners are present would chase the
+waterline more closely, at the cost of the slivers section 6.1 says to avoid.
+
+### 16.3 Normals come from the spectrum, never from the triangles
+
+```python
+n = normalize((-slope_x, -slope_y, 1))     # analytic, from the spectral slopes
+```
+
+Mesh normals are a finite-difference approximation of a field already known
+exactly, and they lose precisely the high-frequency content that matters most
+radiometrically. `WaterMesh.face_normals()` exists **only** as a check — Gate 6
+compares the two and expects them to differ by a few degrees (4.3° mean at
+0.25 m posts). Agreement to machine precision would mean the analytic normals
+had been silently replaced.
+
+### 16.4 The per-vertex channels
+
+The section 0.4 contract, all float32:
+
+| Channel | Meaning |
+|---|---|
+| `mss` | Sub-mesh mean square slope at this spacing **and local depth** → Phase 7 microfacet roughness |
+| `wdir_x`, `wdir_y` | Local wave direction, unit — from the *refracted* heading, not the global wind |
+| `aniso` | Crosswind / upwind slope variance ratio |
+| `depth` | Local still-water depth |
+| `foam` | Foam coverage fraction |
+| `wetness` | Submergence duty cycle (not in the original contract; it is what the thermal solver needs) |
+
+**`mss` is depth-dependent, and that was not obvious.** The tempting argument is
+that sub-mesh waves are short — at 0.125 m posts the cut is `k = 25 rad/m`,
+wavelengths under 25 cm — so they are deep-water waves everywhere and the
+sub-mesh share is a scene constant. That is true over almost the whole domain
+and false exactly where it matters:
+
+| Depth | `kd` | Sub-mesh mss vs deep water |
+|---|---|---|
+| 3 cm | 0.75 | **+44%** |
+| 5 cm | 1.26 | +11% |
+| 10 cm | 2.51 | +0.6% |
+| 20 cm+ | >5 | +0.0% |
+
+Converged past `kd ≈ 2.5`, badly wrong below it — and below it is the surf and
+swash band. A coarser mesh is worse: at 0.25 m posts the 3 cm error is +142%.
+So the depth is used, via a log-spaced lookup interpolated per vertex, because
+`mss_above` is a radial quadrature far too slow to call millions of times.
+
+`wdir` comes from the refracted local heading (section 6.5). If it were the
+global wind it would be constant, and glint in the surf zone would elongate
+along the wrong axis.
+
+### 16.5 Export — PLY, not OBJ
+
+**Binary PLY is the deliverable.** OBJ has positions, normals and texture
+coordinates and no mechanism for arbitrary named per-vertex scalars, so an OBJ
+carries **none** of the channels above. Exporting only OBJ would silently drop
+everything that makes the mesh worth generating.
+
+Mitsuba's PLY loader passes unknown per-vertex properties through as mesh
+attributes, reachable from a custom BSDF as `mesh_attribute` textures. That is
+the entire delivery path into Phase 7, and there is a round-trip test asserting
+every channel survives a write/read cycle *exactly* — the five-minute check
+section 6.6 asks for before betting Phase 7 on the format.
+
+Binary rather than ASCII: about a quarter the size and far faster to parse.
+
+`write_obj` exists because dropping a mesh into MeshLab or Blender to check it
+looks right is reasonable. It prints what it discarded and repeats it in the
+file header, so nobody mistakes it for an equivalent file. For reference, the
+shipped lake window is 21.6 MB as PLY with all seven channels and 42.9 MB as OBJ
+with none.
+
+Every export writes a JSON sidecar with `t`, wind, seed, `git_sha`, spacing,
+region and per-channel ranges. Section 6.6 is right about why: when a signature
+question surfaces six months later, the first thing anyone asks is what wind,
+what seed, what code produced that image.
+
+### 16.6 What Gate 6 checks
+
+All of it except the two LOD-ring items, which do not apply:
+
+- structurally sound — finite, unit normals, no degenerate or out-of-range faces
+- covers every wet post, and stops within the swash margin
+- onshore vertices sit below the bed (no z-fighting)
+- analytic vs face normals differ by a few degrees, not zero and not wildly
+- the LOD invariant closes at the mesh spacing
+- every channel survives the PLY round-trip exactly
+- a rebuilt frame is bit-identical

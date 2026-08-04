@@ -4,12 +4,12 @@
 
 | | |
 |---|---|
-| generated | 2026-08-03 13:41:03 UTC |
-| git_sha | `0cbeb0f0f6bf661bae5de720dc6529319eb68180 (working tree dirty)` |
+| generated | 2026-08-04 04:27:35 UTC |
+| git_sha | `117123424fe34917ff8086aa9a7147c93ecafd14 (working tree dirty)` |
 | scene | `configs/test_lake.yaml` |
 | python | 3.14.5 (Windows AMD64) |
 | numpy / scipy | 2.5.1 / 1.18.0 |
-| checks recorded | 96 |
+| checks recorded | 111 |
 | exit status | PASS |
 
 Every number below was measured by the test suite against the implementation in this commit. Tolerances are the gate criteria from `littoral-water-implementation-cookbook.md`, except where a deviation is recorded in [Gate deviations](#gate-deviations).
@@ -209,6 +209,42 @@ Notes:
 - **depth from the coarse vs refined grid, 5 m offshore** -- Grids are 1 m and 0.25 m; they describe one beach, so a sample must not depend on which is used.
 - **shipped configs that load and build** -- coastal_bay: Hs 1.432 m, Tp 4.75 s; test_lake: Hs 0.085 m, Tp 1.05 s.
 - **cropped vs parent bathymetry, worst sampling difference** -- Parent (200, 4000), crop (81, 1001). The crop carries its own origin, so world coordinates are unchanged.
+
+## Gate 6 -- mesh generation and export
+
+| Check | Measured | Reference | Rel. error | Tolerance | Result |
+|---|---|---|---|---|---|
+| mesh vertices | 19762 | -- | -- | -- | PASS |
+| max |‖normal‖ - 1| | 5.9605e-08 | 0 | -- | 1.0e-05 | PASS |
+| min normal z component | 0.894587 | -- | -- | -- | PASS |
+| wet posts not meshed | 0 | 0 | -- | 0.0e+00 | PASS |
+| furthest inland meshed post (sdf) | 0.25 m | -- | -- | -- | PASS |
+| smallest terrain-minus-mesh clearance onshore | 0.019997 m | -- | -- | -- | PASS |
+| analytic vs face normal angle, mean | 4.2577 deg | -- | -- | -- | PASS |
+| LOD invariant at the mesh spacing | 0.046111 | 0.046111 | 3.61e-07 | 1.0e-02 | PASS |
+| lookup vs direct quadrature for sub-mesh mss | 4.7215e-04 | 0 | -- | 2.0e-02 | PASS |
+| sub-mesh mss at 3 cm depth vs deep water | 0.441373 | -- | -- | -- | PASS |
+| sub-mesh mss at 1-5 m depth vs deep water | 0 | 0 | -- | 1.0e-06 | PASS |
+| max ‖wave direction‖ - 1 | 5.9605e-08 | 0 | -- | 1.0e-05 | PASS |
+| spread of per-vertex wave direction | 38.2809 deg | -- | -- | -- | PASS |
+| PLY round-trip, worst property error | 0 | 0 | -- | 0.0e+00 | PASS |
+| max difference between two builds of the same frame | 0 | 0 | -- | 0.0e+00 | PASS |
+
+Notes:
+
+- **mesh vertices** -- 38,880 triangles at 0.25 m post spacing over a 60 x 22 m region.
+- **min normal z component** -- Must stay positive; a downward normal means the surface folded through itself.
+- **wet posts not meshed** -- A gap here shows up as a hole at the waterline.
+- **furthest inland meshed post (sdf)** -- Swash margin is 0.38 m; the mesh is dilated landward by that much so the swash band has geometry to live on.
+- **smallest terrain-minus-mesh clearance onshore** -- 241 vertices sit landward of the waterline. Positive means the bed is above the water mesh, so the water is hidden rather than fighting for the same pixels.
+- **analytic vs face normal angle, mean** -- p95 8.6 deg, max 16.4 deg. At 0.25 m posts the mesh barely resolves the finest spectral band, so a few degrees of disagreement is the expected cost of differencing rather than a defect.
+- **LOD invariant at the mesh spacing** -- Mesh carries 25% of the slope variance as geometry; the BSDF gets the remaining 75% as roughness (Beckmann alpha = 0.1866).
+- **lookup vs direct quadrature for sub-mesh mss** -- `mss_above` is a radial quadrature, far too slow per vertex, so it is interpolated over a log-spaced depth table. This bounds the interpolation error against calling it directly.
+- **sub-mesh mss at 3 cm depth vs deep water** -- kd = 0.75 there. Treating the sub-mesh share as a scene constant would understate the roughness handed to the BSDF by this much, in the one band anyone looks at.
+- **sub-mesh mss at 1-5 m depth vs deep water** -- Converged past kd ~ 2.5, so the common case costs nothing.
+- **max ‖wave direction‖ - 1** -- Unit by construction; a drift here would tilt the anisotropy frame in Phase 7.
+- **spread of per-vertex wave direction** -- Global wind is 45 deg; the mesh spans 45 to 83 deg as waves refract toward the contours. A constant field would mean refraction never reached the channel.
+- **PLY round-trip, worst property error** -- 13 float properties per vertex: position, normal and 7 channels. Binary little-endian float32, so exact rather than merely close.
 
 ## Gate deviations
 

@@ -20,7 +20,8 @@ anisotropy — as physically derived numbers rather than art-directed knobs.
 | 3 | Validation suite, `docs/validation_report.md` | **Implemented** |
 | 4 | Houdini terrain and lake basin | Not started — `bathymetry.py` supplies a synthetic Dean profile satisfying the same field contract |
 | 5 | Shoaling, refraction, breaking, foam | **Implemented** against that synthetic profile |
-| 6–10 | Mesh export, Mitsuba BSDF, emissivity, EMBER integration | Not started |
+| 6 | Mesh generation, channel packing, PLY export | **Implemented** — constant post spacing; §6.2 LOD rings deliberately deferred |
+| 7–10 | Mitsuba BSDF, emissivity, EMBER integration | Not started |
 
 **New here?** [docs/gallery.md](docs/gallery.md) explains the whole model in
 eight figures, with no code required.
@@ -45,6 +46,7 @@ Everything lands in `runs/my_scene/`:
 | `channels/*.npy` | Per-cell nearshore fields + `manifest.json` — what Phase 6 will consume. |
 | `summary.json` | Every number in `summary.md`, machine-readable. |
 | `open.mp4`, `shore.mp4` | Animations, with `--animate`. |
+| `mesh/water_0000.ply` | Displaced mesh + per-vertex channels, with `--mesh`. |
 
 Takes about 40 s for a small lake, a couple of minutes for a large coastal scene.
 Add `--quick` to skip the channel export and the HTML page.
@@ -56,6 +58,31 @@ spilling breakers, 0.4 m swash) and [`coastal_bay.yaml`](configs/coastal_bay.yam
 swash). Every figure, number and channel is derived from the config, so a
 disagreement with the validation report means the code changed — not that the
 picture went stale.
+
+## Export a mesh
+
+```bash
+python scripts/run_scene.py configs/my_scene.yaml --mesh
+python scripts/run_scene.py configs/my_scene.yaml --mesh --mesh-dx 0.25        --mesh-region 400 380 500 405 --mesh-obj
+```
+
+Writes a **binary PLY** carrying the per-vertex channels a renderer needs —
+`mss`, `wdir_x/y`, `aniso`, `depth`, `foam`, `wetness` — plus a JSON sidecar with
+the seed, wind, time and git sha that produced it.
+
+**PLY, not OBJ.** OBJ has positions, normals and texture coordinates and no
+mechanism for arbitrary per-vertex scalars, so an OBJ carries none of the
+channels — which is everything that makes the mesh worth generating rather than
+just a displaced plane. Mitsuba's PLY loader passes unknown properties through
+as `mesh_attribute` textures, and that is the delivery path into Phase 7.
+`--mesh-obj` writes one anyway for viewing in MeshLab or Blender; it says in its
+own header what it dropped.
+
+**Post spacing enters quadratically.** The shipped lake at its configured
+0.125 m spacing is 8000 × 8000 = 64 M posts over the full 1 km domain, several
+GB for one frame. So either coarsen `--mesh-dx` or bound `--mesh-region`;
+bounding the region is what stands in for LOD rings until §6.2 is built. The
+default is a shoreline window of about 900 posts a side.
 
 ## Watch it move
 
@@ -100,7 +127,7 @@ Python 3.11+. Runtime deps: `numpy`, `scipy`, `pyyaml`.
 ## Validate
 
 ```bash
-pytest                    # 72 checks, ~50 s
+pytest                    # 91 checks, ~90 s
 ```
 
 The suite is the traceability argument, not CI hygiene. Every test records the
@@ -157,11 +184,15 @@ pywave/
   bathymetry.py   PHASE 5: synthetic Dean beach (stands in for the Phase 4 export)
   nearshore.py    PHASE 5: shoaling, Snell refraction, breaking, wetness
   foam.py         PHASE 5: foam with bounded, reproducible spin-up
+  mesh.py         PHASE 6: water extent, triangulation, displacement
+  channels.py     PHASE 6: per-vertex channels (the section 0.4 contract)
+  export.py       PHASE 6: binary PLY, OBJ, provenance sidecar
 tests/
   test_spectrum.py        PHASE 3: Gate 1 checks
   test_surface.py         PHASE 3: Gate 2 checks
   test_reproducibility.py PHASE 3: Gate 3, determinism + regression baseline
   test_nearshore.py       PHASE 5: Gate 5 checks
+  test_mesh.py            PHASE 6: Gate 6 checks
   make_baseline.py        regenerates tests/baseline/ (a deliberate act)
 scripts/
   run_scene.py     config -> every artifact, in one directory

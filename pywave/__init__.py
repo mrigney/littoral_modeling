@@ -27,14 +27,19 @@ Phase 5 (nearshore, foam)          implemented against that synthetic profile.
                                    Shoaling, Snell refraction, depth-limited
                                    breaking, swash wetness and foam with
                                    bounded spin-up.
-Phase 6+ (mesh, BSDF, emissivity)  not started
+Phase 6 (mesh, channels, export)   partially implemented -- constant post
+                                   spacing only.  Section 6.2's LOD rings are
+                                   deliberately not built; ``mesh.py`` meshes at
+                                   one spacing and bounds the region instead.
+Phase 7+ (BSDF, emissivity)        not started
 
 See ``docs/users_guide.md`` for the user-facing documentation.
 """
 
 from __future__ import annotations
 
-from . import bathymetry, constants, foam, moments, nearshore, spectrum, surface, tiling
+from . import (bathymetry, channels, constants, export, foam, mesh, moments,
+               nearshore, spectrum, surface, tiling)
 from .config import Config, load_config
 
 __version__ = "0.1.0"
@@ -48,6 +53,9 @@ __all__ = [
     "bathymetry",
     "nearshore",
     "foam",
+    "mesh",
+    "channels",
+    "export",
     "Config",
     "load_config",
     "__version__",

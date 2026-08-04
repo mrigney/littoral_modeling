@@ -14,6 +14,7 @@ Point it at a scene YAML and it produces, in one directory:
     overview.html       one self-contained page you can mail to someone
     figures/*.png       eight figures
     channels/*.npy      the per-cell nearshore fields, plus a manifest
+    mesh/water_0000.ply displaced mesh with per-vertex channels  (--mesh)
     open.mp4            open-water animation      (--animate)
     shore.mp4           shoreline animation       (--animate)
 
@@ -268,6 +269,7 @@ def write_summary_md(summary: dict, path: Path) -> None:
         "| `figures/` | Eight PNGs at 150 dpi. |",
         "| `channels/` | Per-cell nearshore fields as `.npy`, with `manifest.json`. |",
         "| `summary.json` | Everything in this report, machine-readable. |",
+        "| `mesh/` | Displaced PLY with per-vertex channels, if `--mesh` was passed. |",
         "| `open.*` / `shore.*` | Animations, if `--animate` was passed. |",
         "",
     ]
@@ -346,6 +348,25 @@ def write_channels(scene, out_dir: Path) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _default_region(scene, posts: int = 900):
+    """A shoreline window sized so the default spacing stays affordable.
+
+    Meshing the whole domain at `output.mesh_dx` is usually millions of posts
+    (the shipped lake is 64 M), so the default is a window on the waterline --
+    which is the interesting part and the part LOD rings would otherwise be
+    protecting.
+    """
+    cfg = scene.cfg
+    dx = cfg.output.mesh_dx
+    span = posts * dx
+    b = scene.fine_bathy
+    x0b, x1b, y0b, y1b = b.meta.extent
+    cx = 0.5 * (x0b + x1b)
+    shore = cfg.bathymetry.shoreline
+    return (max(cx - 0.5 * span, x0b), max(shore - 0.75 * span, y0b),
+            min(cx + 0.5 * span, x1b), min(shore + 0.1 * span, y1b))
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -355,6 +376,17 @@ def main() -> int:
                     help="output directory (default: runs/<scene name>)")
     ap.add_argument("--quick", action="store_true",
                     help="skip the channel export and the HTML page")
+    ap.add_argument("--mesh", action="store_true",
+                    help="also build and export the water mesh (PLY + JSON)")
+    ap.add_argument("--mesh-dx", type=float, default=None,
+                    help="mesh post spacing [m]; defaults to output.mesh_dx")
+    ap.add_argument("--mesh-region", type=float, nargs=4, default=None,
+                    metavar=("X0", "Y0", "X1", "Y1"),
+                    help="bound the mesh to a region; spacing enters "
+                         "quadratically, so the whole domain at a fine spacing "
+                         "is usually far too much geometry")
+    ap.add_argument("--mesh-obj", action="store_true",
+                    help="also write an OBJ (geometry only -- no channels)")
     ap.add_argument("--animate", action="store_true",
                     help="also render the open-water and shoreline clips "
                          "(adds a few minutes)")
@@ -411,6 +443,27 @@ def main() -> int:
 
         print("building the self-contained page ...", flush=True)
         mo.build_page(scene, out / "overview.html")
+
+    if args.mesh:
+        from pywave import export as pw_export
+        from pywave import mesh as pw_mesh
+
+        print("building the water mesh ...", flush=True)
+        region = tuple(args.mesh_region) if args.mesh_region else _default_region(scene)
+        foam_field, _ = scene.foam_field()
+        wm = pw_mesh.build_water_mesh(
+            scene.tileset, scene.fine_bathy, cfg, t=0.0,
+            dx=args.mesh_dx, region=region,
+            foam=foam_field, foam_bathy=scene.fine_bathy)
+        stats = wm.validate()
+        written = pw_export.export_frame(wm, out / "mesh", "water_0000",
+                                         obj=args.mesh_obj)
+        print(f"  {stats['n_vertices']:,} vertices, {stats['n_faces']:,} faces "
+              f"at {wm.meta['mesh_dx']:g} m over "
+              f"{region[2] - region[0]:.0f} x {region[3] - region[1]:.0f} m")
+        for kind, path in written.items():
+            print(f"  {kind:4s} {path.stat().st_size / 1024 / 1024:6.2f} MiB  "
+                  f"{path.name}")
 
     if args.animate:
         import animate as anm
