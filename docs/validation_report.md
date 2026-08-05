@@ -4,8 +4,8 @@
 
 | | |
 |---|---|
-| generated | 2026-08-05 02:12:35 UTC |
-| git_sha | `b2d818e0ee2a019a71270fa08c3c082afd4f9c64 (working tree dirty)` |
+| generated | 2026-08-05 02:55:09 UTC |
+| git_sha | `cfd6965077024a6883581468e4dd635c77ac8866 (working tree dirty)` |
 | scene | `configs/test_lake.yaml` |
 | python | 3.14.5 (Windows AMD64) |
 | numpy / scipy | 2.5.1 / 1.18.0 |
@@ -42,7 +42,7 @@ Every number below was measured by the test suite against the implementation in 
 | mss_up | 0.025622 | -- | -- | -- | PASS |
 | mss_cross | 0.020484 | -- | -- | -- | PASS |
 | mss_up + mss_cross vs mss_above(0) | 0.046106 | 0.046111 | 1.02e-04 | 1.0e-03 | PASS |
-| upwind / crosswind anisotropy ratio | 1.2508 | -- | -- | -- | PASS |
+| upwind / crosswind anisotropy ratio | 1.2508 | 1.2617 | 8.63e-03 | 6.0e-01 | PASS |
 | mss / Cox-Munk, U10 = 5.0 m/s, lake fetch | 1.5751 | 1 | 5.75e-01 | 3.0e+00 | PASS |
 | mss / Cox-Munk, U10 = 5.0 m/s, ocean fetch | 0.765968 | 1 | 2.34e-01 | 3.0e+00 | PASS |
 | worst mss/Cox-Munk factor over U10 3-15 m/s, both fetches | 2.0708 | 1 | 1.07e+00 | 3.0e+00 | PASS |
@@ -62,7 +62,7 @@ Notes:
 - **dispersion round trip, d = 0.5 / 3 / 20 m** -- Newton iteration seeded with Eckart's approximation.
 - **mss_above(0) (total mean square slope)** -- Integrated to k = 400.0 rad/m (lambda = 1.6 cm). The Phillips tail integrates logarithmically, so this number depends on where that cut is placed -- it is a modelling choice.
 - **mss_above(k) strictly decreasing** -- Over 80 log-spaced cuts on [1e-3, 400.0] rad/m. Largest (i.e. least negative) step: -2.321e-10.
-- **upwind / crosswind anisotropy ratio** -- Cox & Munk measured ~1.3 at open-ocean fetch.
+- **upwind / crosswind anisotropy ratio** -- Cox & Munk (1954) give 1.26 at this wind speed from an open-ocean fit; a 1 km freshwater fetch has a different high-frequency balance, so this is a sanity bound rather than a target.
 - **mss / Cox-Munk, U10 = 5.0 m/s, lake fetch** -- mss = 0.04611, Cox-Munk = 0.02928 at U12 = 5.13 m/s.
 - **mss / Cox-Munk, U10 = 5.0 m/s, ocean fetch** -- mss = 0.02242, Cox-Munk = 0.02928 at U12 = 5.13 m/s.
 - **Tz / Tp** -- Physically 0.7-0.8 for a JONSWAP sea; a value near 1 or near 0.1 means the wrong moment is in the denominator.
@@ -110,7 +110,7 @@ Notes:
 - **worst corr(J - 1, h) over tiles** -- Negative means the surface compresses where elevation is high, i.e. crests sharpen and troughs broaden, as in a Gerstner trochoid.
 - **crest phase speed** -- Single mode, k = 0.3927 rad/m, along +x. A sign error in the time evolution would give -4.9981 m/s.
 - **Tz from zero crossings** -- 256 probe points, 48 s at 24 Hz, 27005 crossings. Theory banded to k in [0.098, 12.57] rad/m. Against the untruncated Tz of 0.816 s the error would be 11.7%.
-- **Hs loss, cubic sampling (order=3)** -- Bilinear (order=1) loses 5.8% for comparison. At the Nyquist, bilinear retains only 1/3 of the power.
+- **Hs loss, cubic sampling (order=3)** -- Bilinear (order=1) loses 5.8% for comparison, and the standalone bilinear routine loses 2.3% of one tile's standard deviation. At the Nyquist, bilinear retains only 1/3 of the power.
 
 ## Gate 3 -- reproducibility and regression
 

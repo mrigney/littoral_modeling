@@ -403,17 +403,29 @@ def test_cubic_sampling_beats_bilinear(record, tileset, tileset_fields, sample_p
     x, y = sample_points
     grid = tileset.hs()
     hs_cubic = 4.0 * float(np.std(tileset.sample(x, y, 0.0, fields=tileset_fields, order=3).h))
+
+    # Sample through the standalone bilinear routine rather than `order=1`, so
+    # the two implementations are compared rather than two flags on one of them.
+    # A single tile is enough: the loss is a property of the interpolator.
+    tile, field = tileset.tiles[0], tileset_fields[0]
+    lin = tiling.sample_bilinear_periodic(field.h, x, y, tile.size)
+    cub = tiling.sample_periodic(field.h, x, y, tile.size, order=3)
+    tile_loss = 1.0 - float(np.std(lin)) / float(np.std(cub))
+
     hs_linear = 4.0 * float(np.std(tileset.sample(x, y, 0.0, fields=tileset_fields, order=1).h))
 
     loss_cubic = 1.0 - hs_cubic / grid
     loss_linear = 1.0 - hs_linear / grid
 
     record("2", "Hs loss, cubic sampling (order=3)", loss_cubic, 0.0, 0.03,
-           note=f"Bilinear (order=1) loses {100 * loss_linear:.1f}% for comparison. "
+           note=f"Bilinear (order=1) loses {100 * loss_linear:.1f}% for comparison, "
+                f"and the standalone bilinear routine loses "
+                f"{100 * tile_loss:.1f}% of one tile's standard deviation. "
                 f"At the Nyquist, bilinear retains only 1/3 of the power.",
            passed=loss_cubic < 0.03)
     assert loss_cubic < 0.03
     assert loss_cubic < loss_linear
+    assert tile_loss > 0.0, "the standalone bilinear routine should also lose power"
 
 
 def test_band_edges_reject_unrepresentable_bands(cfg):

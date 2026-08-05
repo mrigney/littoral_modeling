@@ -189,8 +189,6 @@ def _fmt(v):
     return str(v)
 
 
-_UNITS = {"_m": "m", "_s": "s", "_hz": "Hz", "_deg": "deg", "_ms": "m/s",
-          "_m2": "m²", "_rad_m": "rad/m"}
 
 
 def write_summary_md(summary: dict, path: Path) -> None:

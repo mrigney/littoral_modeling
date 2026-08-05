@@ -303,8 +303,14 @@ def test_mss_anisotropic_splits_the_total(record, scene):
     record("1", "mss_up", up, passed=True)
     record("1", "mss_cross", cross, passed=True)
     record("1", "mss_up + mss_cross vs mss_above(0)", up + cross, total, 1e-3, passed=rel < 1e-3)
+    cm_up, cm_cross = moments.cox_munk_anisotropic(constants.u10_to_u12(u10))
     record("1", "upwind / crosswind anisotropy ratio", up / cross,
-           note="Cox & Munk measured ~1.3 at open-ocean fetch.")
+           cm_up / cm_cross, 0.60,
+           note=f"Cox & Munk (1954) give {cm_up / cm_cross:.2f} at this wind "
+                f"speed from an open-ocean fit; a 1 km freshwater fetch has a "
+                f"different high-frequency balance, so this is a sanity bound "
+                f"rather than a target.",
+           passed=abs(up / cross - cm_up / cm_cross) / (cm_up / cm_cross) < 0.60)
     assert rel < 1e-3
     assert up > cross
 

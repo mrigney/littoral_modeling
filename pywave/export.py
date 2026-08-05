@@ -33,17 +33,13 @@ from pathlib import Path
 
 import numpy as np
 
+from .channels import CHANNEL_UNITS
+
 __all__ = ["write_ply", "write_obj", "write_frame_metadata", "export_frame",
            "read_ply", "mitsuba_scene_params", "mitsuba_scene_dict",
            "write_mitsuba_scene", "write_mitsuba_xml",
            "write_terrain_export"]
 
-_PLY_TYPES = {
-    np.dtype(np.float32): "float",
-    np.dtype(np.float64): "double",
-    np.dtype(np.int32): "int",
-    np.dtype(np.uint8): "uchar",
-}
 
 
 def _git_sha(root: Path | None = None) -> str:
@@ -213,6 +209,7 @@ def write_frame_metadata(mesh, path, extra: dict | None = None) -> Path:
         "n_faces": mesh.n_faces,
         "channels": {
             name: {
+                "unit": CHANNEL_UNITS.get(name, "?"),
                 "min": float(np.min(arr)), "max": float(np.max(arr)),
                 "mean": float(np.mean(arr)),
             } for name, arr in sorted(mesh.channels.items())

@@ -49,8 +49,6 @@ GRID = "#dde3e8"
 
 WATER = LinearSegmentedColormap.from_list(
     "water", ["#0b2b3f", "#12506e", "#2b86a8", "#78c2d2", "#dff3f6"])
-SAND = LinearSegmentedColormap.from_list(
-    "sand", ["#0b2b3f", "#17627f", "#63b0c4", "#d9cba3", "#a8895f", "#6d5638"])
 
 _REGISTRY: dict[str, tuple] = {}
 
@@ -913,7 +911,8 @@ def write_gallery(written, cfg, path=None, rel="figures"):
         "| 5 — shoaling, refraction, breaking, foam | implemented |",
         "| 6–10 — mesh export, BSDF, emissivity, integration | not started |",
         "",
-        "See the [user's guide](users_guide.md) for the API and conventions, and "
+        "See the [user's guide](users_guide.md) for how to run it, "
+        "[algorithms.md](algorithms.md) for how each phenomenon is modelled, and "
         "the [validation report](validation_report.md) for every measured number "
         "with the reference it was judged against.",
         "",
