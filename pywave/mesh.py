@@ -248,10 +248,14 @@ def build_water_mesh(
     if nx * ny > max_vertices:
         raise ValueError(
             f"{nx} x {ny} = {nx * ny:,} posts exceeds max_vertices="
-            f"{max_vertices:,}. Coarsen `dx` (it enters quadratically -- "
-            f"doubling it quarters the count) or pass a smaller `region`. "
-            f"At dx = {dx} m the whole area needs "
-            f"{(x1 - x0) * (y1 - y0) / dx**2:,.0f} posts.")
+            f"{max_vertices:,}. This counts the sampling grid, not the mesh: "
+            f"only wet posts are kept, so the PLY is smaller by the wet "
+            f"fraction of the region. The grid is still allocated in full, "
+            f"which is what the guard is protecting. Coarsen `dx` (it enters "
+            f"quadratically -- doubling it quarters the count), pass a smaller "
+            f"`region`, or, if a whole-domain mesh is what you meant, raise "
+            f"the guard: --mesh-max-vertices {int(nx * ny * 1.2)} (or "
+            f"output.mesh_max_vertices in the config).")
 
     xs = x0 + np.arange(nx) * dx
     ys = y0 + np.arange(ny) * dx
@@ -393,7 +397,10 @@ def build_terrain_mesh(
     if nx * ny > max_vertices:
         raise ValueError(
             f"terrain {nx} x {ny} = {nx * ny:,} posts exceeds max_vertices="
-            f"{max_vertices:,}; coarsen dx or shrink the region")
+            f"{max_vertices:,}. Coarsen dx, shrink the region, raise the guard, "
+            f"or supply the bed yourself with --terrain-ply -- the bed covers "
+            f"the whole region where water covers only the wet part, so it is "
+            f"the term that dominates a whole-domain mesh.")
 
     xs = x0 + np.arange(nx) * dx
     ys = y0 + np.arange(ny) * dx

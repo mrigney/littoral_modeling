@@ -236,6 +236,13 @@ class LodRing:
 class OutputConfig:
     fps: float = 30.0
     mesh_dx: float = 0.125
+    #: Mesh every wet cell in the domain rather than a shoreline window.
+    #: For renders where the camera position is not known in advance, so
+    #: there is no window to centre on. `--mesh-full` sets it per run.
+    mesh_full: bool = False
+    #: Vertex guard. Deliberately low enough that an accidental
+    #: whole-domain job at a fine spacing stops rather than swaps.
+    mesh_max_vertices: int = 12_000_000
     lod_rings: tuple[LodRing, ...] = ()
 
 
@@ -344,6 +351,8 @@ def load_config(path: str | Path) -> Config:
     output = OutputConfig(
         fps=float(out_raw.get("fps", 30.0)),
         mesh_dx=float(out_raw.get("mesh_dx", 0.125)),
+        mesh_full=bool(out_raw.get("mesh_full", False)),
+        mesh_max_vertices=int(out_raw.get("mesh_max_vertices", 12_000_000)),
         lod_rings=tuple(
             LodRing(r=float(r["r"]), dx=float(r["dx"]))
             for r in out_raw.get("lod_rings", [])

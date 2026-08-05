@@ -526,7 +526,11 @@ def main() -> int:
         print("building the water mesh ...", flush=True)
         if args.mesh_region:
             region = tuple(args.mesh_region)
-        elif args.mesh_full:
+        elif args.mesh_full or cfg.output.mesh_full:
+            # The whole domain. `build_water_mesh` still meshes only wet cells,
+            # so this is every square metre of water and no triangles over dry
+            # land -- the water mesh comes back the size of the water body,
+            # not the size of the domain.
             region = tuple(scene.bathy.meta.extent[i] for i in (0, 2, 1, 3))
         else:
             region = _default_region(scene)
@@ -551,7 +555,7 @@ def main() -> int:
         mesh_dir = out / "mesh"
 
         budget = (args.mesh_max_vertices if args.mesh_max_vertices
-                  else pw_mesh.DEFAULT_MAX_VERTICES)
+                  else cfg.output.mesh_max_vertices)
         wm = pw_mesh.build_water_mesh(
             scene.tileset, scene.fine_bathy, cfg, t=args.mesh_t,
             dx=args.mesh_dx, region=region, max_vertices=budget,

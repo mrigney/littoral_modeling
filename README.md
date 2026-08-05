@@ -94,11 +94,14 @@ python scripts/run_scene.py configs/my_scene.yaml --mesh
 python scripts/run_scene.py configs/my_scene.yaml --mesh \
        --mesh-dx 0.25 --mesh-region 400 380 500 405 --mesh-t 12.5
 
-# whole domain, for renders where the camera is not known in advance
-python scripts/run_scene.py configs/my_scene.yaml --mesh --mesh-full \
-       --mesh-dx 0.5 --mesh-max-vertices 60000000
+# the whole water surface, for renders where the camera is not known in advance.
+# Only wet posts are meshed, so this is every square metre of water and no
+# triangles over dry land. `output.mesh_full: true` makes it the default.
+python scripts/run_scene.py configs/my_scene.yaml --mesh --mesh-full
 
-# ... or bring your own bed, straight out of the tool that authored the terrain
+# ... with the bed straight out of the tool that authored the terrain. This
+# substitutes for terrain_0000.ply only -- `bathymetry.source` still has to
+# point at the .npy export, which is what the model actually runs on.
 python scripts/run_scene.py configs/my_scene.yaml --mesh --mesh-full \
        --terrain-ply /path/from/houdini/terrain.ply
 python scripts/check_clearance.py runs/my_scene/mesh/water_0000.ply \

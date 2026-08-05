@@ -194,6 +194,8 @@ nearshore:
 output:
   fps: 30.0
   mesh_dx: 0.125                # m, water mesh post spacing
+  mesh_full: false              # true = mesh the whole domain, every run
+  mesh_max_vertices: 12000000   # guard on the sampling grid; raise deliberately
   lod_rings: [...]              # parsed; LOD rings not yet implemented
 ```
 
@@ -363,16 +365,32 @@ exactly what frame 0 costs.
 
 ### Meshing the whole domain
 
-When the camera position is not known in advance, bounding a region is no use.
-`--mesh-full` meshes everything, still clipped to the water body:
+When the camera position is not known in advance there is no window to centre on.
+`--mesh-full` meshes the whole domain:
 
 ```bash
 python scripts/run_scene.py configs/houdini_lake.yaml --mesh --mesh-full \
-       --mesh-dx 0.5 --mesh-max-vertices 60000000
+                                                      --mesh-max-vertices 20142490
 ```
 
-The vertex guard exists to stop an accidental 60 M-post job, so a deliberate one
-has to raise it. `run_scene.py` prints an estimate before it starts building.
+Only **wet** posts are meshed, as always — you get every square metre of water
+and no triangles over dry land, so the water PLY comes back the size of the water
+body rather than the size of the domain. To make it the standing behaviour for a
+scene, put it in the config instead:
+
+```yaml
+output:
+  mesh_full: true
+  mesh_max_vertices: 20142490
+```
+
+The vertex guard counts the **sampling grid**, not the output, because the grid
+is allocated in full before the wet mask is applied — on the shipped lake at its
+configured 0.25 m that is 16.8 M posts against 3.4 M vertices actually kept. It
+is set low on purpose so an accidental whole-domain job stops instead of
+swapping; the error names the exact number to pass. `run_scene.py` also prints a
+vertex/size/time estimate before it starts building.
+
 For the 1 km² shipped lake, 20.5% of it wet:
 
 | `--mesh-dx` | Water verts | Bed verts | Water PLY | Bed PLY | Build |
@@ -420,9 +438,18 @@ So:
 
 ### Bringing your own terrain mesh
 
+> **A supplied PLY does not replace the `.npy` export.** They do different jobs
+> and you need both. The fields *are the model*: `depth`, `sdf` and
+> `shore_normal` drive shoaling, refraction, breaking, foam, wetness and the
+> depth limiter, and nothing reads a PLY for any of that. A terrain PLY is only
+> what the renderer draws for the bed — the one artifact `pywave` would
+> otherwise have generated for you. Point `bathymetry.source` at the export as
+> usual; `--terrain-ply` substitutes for `terrain_0000.ply` and nothing else.
+
 The bed is static, so if the tool that authored the terrain can write a PLY
 directly, that mesh is usually better than one this package regrids — and it
-saves building millions of bed posts on every run.
+saves building millions of bed posts on every run (16.8 M of the 20.2 M posts in
+the full-domain example above are bed).
 
 ```bash
 python scripts/run_scene.py configs/houdini_lake.yaml --mesh --mesh-full \
