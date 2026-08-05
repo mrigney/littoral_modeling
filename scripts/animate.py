@@ -181,7 +181,13 @@ class Shoreline:
         # sized at fourteen peak wavelengths puts both below one pixel, which is
         # the physical point of the project but makes a useless animation.
         # Wide enough to show waves arriving, tight enough to see them break.
-        cross = max(25.0 * scene.swash_band, 6.0 * cfg.lambda_p)
+        #
+        # Floored at forty bathymetry cells, which matters for loaded terrain:
+        # a 10 m window on 1 m posts is ten cells across, and the shoreline
+        # renders as a smooth bilinear blob rather than a coastline. The
+        # synthetic beach at 0.25 m posts already clears this comfortably.
+        cross = max(25.0 * scene.swash_band, 6.0 * cfg.lambda_p,
+                    40.0 * self.bathy.meta.dx)
         along = cross * 1.5
         x0, shore = scene.shore_ref
 
@@ -217,8 +223,9 @@ class Shoreline:
         hs = np.where(self.bathy.depth > 0.0, scene.onshore_tileset.hs() * ks, 0.0)
         self.brk = nearshore.breaking_mask(hs, self.bathy.depth,
                                            cfg.nearshore.breaker_index)
-        self.model = foam_mod.FoamModel(bathy=self.bathy,
-                                        half_life=cfg.nearshore.foam_halflife)
+        self.model = foam_mod.FoamModel(
+            bathy=self.bathy, half_life=cfg.nearshore.foam_halflife,
+            equilibrium=cfg.nearshore.foam_coverage)
         self.foam_state = self.model.evaluate(lambda tt: self.brk, self.cg, t=0.0)
         self.dt = 1.0 / fps
 

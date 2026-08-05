@@ -4,12 +4,12 @@
 
 | | |
 |---|---|
-| generated | 2026-08-04 23:54:52 UTC |
-| git_sha | `4df0a6af8c22ab40c30fb7cb8ac18621027a08f3 (working tree dirty)` |
+| generated | 2026-08-05 00:30:08 UTC |
+| git_sha | `5b175590e9384d0c4db223278aca3d43bdf29ca1 (working tree dirty)` |
 | scene | `configs/test_lake.yaml` |
 | python | 3.14.5 (Windows AMD64) |
 | numpy / scipy | 2.5.1 / 1.18.0 |
-| checks recorded | 124 |
+| checks recorded | 126 |
 | exit status | PASS |
 
 Every number below was measured by the test suite against the implementation in this commit. Tolerances are the gate criteria from `littoral-water-implementation-cookbook.md`, except where a deviation is recorded in [Gate deviations](#gate-deviations).
@@ -187,14 +187,16 @@ Notes:
 | realised 4 std(h) vs predicted Hs_local (worst) | 0.077646 | 0 | -- | 1.0e-01 | PASS |
 | max |h_nearshore - h_deep| at d = 4.9 m | 2.7756e-17 m | 0 m | -- | 1.0e-03 | PASS |
 | foam remaining after one half life | 0.5 | 0.5 | 0.00e+00 | 1.0e-09 | PASS |
-| equilibrium foam coverage in a breaking cell | 0.890858 | 0.890858 | 9.24e-11 | 1.0e-06 | PASS |
+| equilibrium foam coverage in a breaking cell | 0.874785 | 0.874785 | 9.24e-11 | 1.0e-06 | PASS |
 | max |sdf| where foam coverage > 0.01 | 1.375 m | -- | -- | -- | PASS |
-| peak foam coverage | 0.266497 | -- | -- | -- | PASS |
+| peak foam coverage | 0.261689 | -- | -- | -- | PASS |
 | cold vs sequential, worst per-cell relative error | 0.006144 | 0 | -- | 1.0e-02 | PASS |
 | spin-up steps for 0.5% residual at 30 fps | 688 | -- | -- | -- | PASS |
 | depth from the coarse vs refined grid, 5 m offshore | 3.0543e-04 m | 0 m | -- | 5.0e-02 | PASS |
 | shipped configs that load and build | 3 | -- | -- | -- | PASS |
 | cropped vs parent bathymetry, worst sampling difference | 0 | 0 | -- | 1.0e-12 | PASS |
+| foam equilibrium across half lives 1-30 s (worst deviation) | 0 | 0 | -- | 1.0e-09 | PASS |
+| shipped configs, foam equilibrium | 3 | -- | -- | -- | PASS |
 
 Notes:
 
@@ -221,7 +223,7 @@ Notes:
 - **realised 4 std(h) vs predicted Hs_local (worst)** -- d = 0.29 m: 0.08536 vs 0.07921; d = 0.74 m: 0.07977 vs 0.08449; d = 1.17 m: 0.08577 vs 0.08526. Sampled across 4000 points at constant depth.
 - **max |h_nearshore - h_deep| at d = 4.9 m** -- Depth 5 m against a 1.7 m peak wavelength: kd = 17.9, comfortably deep, so Ks = Kr = 1 and the transform is the identity.
 - **foam remaining after one half life** -- Half life 3.0 s from config. After two half lives: 0.250000 (want 0.25).
-- **equilibrium foam coverage in a breaking cell** -- seed_rate = 0.2/s. Continuous-limit value is 0.8656, which is what to reason about when choosing seed_rate since it does not depend on the step size.
+- **equilibrium foam coverage in a breaking cell** -- equilibrium 0.85, so rate = 0.1964/s. Continuous-limit value is 0.8500, which is what to reason about when choosing coverage since it does not depend on the step size.
 - **max |sdf| where foam coverage > 0.01** -- Breaking itself extends to |sdf| = 0.88 m; foam is advected shoreward from there. Whitecaps over open water (~0.1% coverage at 5 m/s) are deliberately not modelled.
 - **peak foam coverage** -- Below the still-water equilibrium because advection continually sweeps foam out of the cells that seed it.
 - **cold vs sequential, worst per-cell relative error** -- Spin-up 92 steps = 23.0 s, initial-condition residual 0.0049. As a fraction of peak coverage the error is 0.121%. The cookbook's suggested 30 frames would leave 79% of the initial condition intact -- the window is set by the half life, not by a frame count.
@@ -229,6 +231,8 @@ Notes:
 - **depth from the coarse vs refined grid, 5 m offshore** -- Grids are 1 m and 0.25 m; they describe one beach, so a sample must not depend on which is used.
 - **shipped configs that load and build** -- coastal_bay: Hs 1.432 m, Tp 4.75 s; houdini_lake: Hs 0.085 m, Tp 1.05 s; test_lake: Hs 0.085 m, Tp 1.05 s.
 - **cropped vs parent bathymetry, worst sampling difference** -- Parent (200, 4000), crop (81, 1001). The crop carries its own origin, so world coordinates are unchanged.
+- **foam equilibrium across half lives 1-30 s (worst deviation)** -- Target 0.85. 1s: 0.850, 3s: 0.850, 6s: 0.850, 12s: 0.850, 30s: 0.850. The rate is derived from the target and the half life, so the coverage a breaking cell reaches no longer depends on how long foam survives.
+- **shipped configs, foam equilibrium** -- coastal_bay: t_half 6s -> 0.850; houdini_lake: t_half 3s -> 0.850; test_lake: t_half 3s -> 0.850. All below the clip ceiling.
 
 ## Gate 6 -- mesh generation and export
 

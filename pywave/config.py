@@ -215,6 +215,13 @@ class BathymetryConfig:
 class NearshoreConfig:
     breaker_index: float = 0.78
     foam_halflife: float = 3.0
+    foam_coverage: float = 0.85
+    """Coverage a continuously breaking cell settles at [0-1].
+
+    The seeding rate is derived from this and ``foam_halflife`` rather than set
+    directly, because the two are tied together by the equilibrium and setting
+    a rate independently saturates at some half lives and not others.
+    """
     refraction: bool = True
     shoaling: bool = True
 
@@ -330,6 +337,7 @@ def load_config(path: str | Path) -> Config:
     nearshore = NearshoreConfig(
         breaker_index=float(near_raw.get("breaker_index", 0.78)),
         foam_halflife=float(near_raw.get("foam_halflife", 3.0)),
+        foam_coverage=float(near_raw.get("foam_coverage", 0.85)),
         refraction=bool(near_raw.get("refraction", True)),
         shoaling=bool(near_raw.get("shoaling", True)),
     )

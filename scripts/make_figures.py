@@ -191,7 +191,8 @@ class Scene:
             brk = nearshore.breaking_mask(hs, b.depth,
                                           self.cfg.nearshore.breaker_index)
             model = foam_mod.FoamModel(
-                bathy=b, half_life=self.cfg.nearshore.foam_halflife)
+                bathy=b, half_life=self.cfg.nearshore.foam_halflife,
+                equilibrium=self.cfg.nearshore.foam_coverage)
             return model.evaluate(lambda tt: brk, cg, t=t), brk
 
         return self._memo("foam", make)

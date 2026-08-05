@@ -307,6 +307,7 @@ bathymetry:                     # the synthetic basin (PHASE 4 stand-in)
 
 nearshore:                      # PHASE 5
   breaker_index: 0.78
+  foam_coverage: 0.85           # coverage a continuously breaking cell reaches
   foam_halflife: 3.0            # s
   refraction: true
   shoaling: true
@@ -987,6 +988,27 @@ cell, against the 1% the gate asks for. At the default it is 0.61%.
 
 Foam does not sub-step at the frame rate: advection is semi-Lagrangian and
 unconditionally stable, so 0.25 s costs 6× less for no visible difference.
+
+#### Coverage, not rate
+
+The knob is `nearshore.foam_coverage` — the coverage a *continuously breaking*
+cell settles at. The per-second seeding rate is derived from it:
+
+```
+seed_rate = foam_coverage * ln2 / foam_halflife
+```
+
+**Not the other way round**, and that ordering is the whole point. Seeding and
+decay are tied together (a cell converges to `seed_rate * t_half / ln2`), so a
+rate tuned at one half life saturates at another. The model originally took a
+fixed 0.2/s, which gives 0.87 coverage at a 3 s half life and **clips at 1.0**
+by 6 s — which is exactly what happened to `coastal_bay`, whose entire 50 m surf
+band sat pinned at full coverage with no internal structure.
+
+That is not a cosmetic problem once Phase 7 blends BSDFs by this fraction: a
+saturated band renders as pure foam with zero water contribution, so no Fresnel
+and no glint anywhere in the surf zone. Gate 5 now asserts no shipped config
+saturates, and that equilibrium is invariant across half lives from 1 to 30 s.
 
 ### 14.7 Putting it together
 

@@ -49,6 +49,10 @@ bathymetry:
 nearshore:
   breaker_index: 0.78
   foam_halflife: 6.0            # s -- bigger breakers, longer-lived foam
+  foam_coverage: 0.85           # coverage a continuously breaking cell reaches.
+                                # Derived into a seeding rate, so this stays 0.85
+                                # whatever the half-life is; a fixed rate would
+                                # saturate the whole surf band at this one.
   refraction: true
   shoaling: true
 

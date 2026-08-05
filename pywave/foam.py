@@ -83,23 +83,48 @@ class FoamModel:
     than over a wave tile -- it lives where the shore is, not where the FFT
     lattice happens to be.
 
+    Parameterised by coverage, not by rate
+    --------------------------------------
+    The knob is ``equilibrium``: the coverage a *continuously breaking* cell
+    settles at.  The per-second seeding rate follows from it and the half life,
+
+        ``seed_rate = equilibrium * ln2 / half_life``
+
+    rather than the other way round.  That ordering matters.  Seeding and decay
+    are not independent -- a cell converges to ``seed_rate * t_half / ln2`` --
+    so a rate that behaves well at one half life saturates at another.  A fixed
+    ``seed_rate = 0.2`` gives 0.87 coverage at a 3 s half life and **clips at
+    1.0** by 6 s, which is how a scene ends up with its entire surf band pinned
+    at full coverage and no internal structure at all.
+
+    Saturation is not a cosmetic problem once Phase 7 blends BSDFs by this
+    fraction: a band at 1.0 renders as pure foam with zero water contribution,
+    so no Fresnel and no glint anywhere in the surf zone.
+
     Parameters
     ----------
-    seed_rate : coverage added per second in cells that are breaking [1/s].
-        A continuously breaking cell converges to ``seed_rate * t_half / ln2``,
-        so the default of 0.2 gives an equilibrium coverage of ~0.87 at a 3 s
-        half life. Setting it to 1.0 saturates every breaking cell to full
-        coverage, which throws away the distinction between the outer surf and
-        the inner swash.
+    equilibrium : coverage a continuously breaking cell converges to [0-1].
+        Kept below 1 so there is headroom to distinguish the outer surf from the
+        inner swash.
     half_life : decay half life [s]; ``nearshore.foam_halflife`` in config.
+    seed_rate : override the derived rate [1/s].  Rarely wanted; it decouples
+        the two quantities that the equilibrium ties together.
     advect : whether to transport foam shoreward at the group velocity.
     """
 
     bathy: object
-    seed_rate: float = 0.2
+    equilibrium: float = 0.85
     half_life: float = 3.0
+    seed_rate: float | None = None
     advect: bool = True
     max_coverage: float = 1.0
+
+    @property
+    def rate(self) -> float:
+        """Seeding rate actually in force [1/s]."""
+        if self.seed_rate is not None:
+            return float(self.seed_rate)
+        return float(self.equilibrium * np.log(2.0) / self.half_life)
 
     def step(self, foam: np.ndarray, breaking: np.ndarray, cg: np.ndarray,
              dt: float) -> np.ndarray:
@@ -126,7 +151,7 @@ class FoamModel:
                                   mode="nearest")
 
         out = out * foam_decay_factor(dt, self.half_life)
-        out = out + self.seed_rate * dt * breaking.astype(np.float64)
+        out = out + self.rate * dt * breaking.astype(np.float64)
         return np.clip(out, 0.0, self.max_coverage)
 
     def evaluate(
@@ -187,7 +212,7 @@ class FoamModel:
         choosing ``seed_rate`` because it does not depend on the step size.
         """
         if dt is None:
-            value = self.seed_rate * self.half_life / np.log(2.0)
+            value = self.rate * self.half_life / np.log(2.0)
         else:
-            value = self.seed_rate * dt / (1.0 - foam_decay_factor(dt, self.half_life))
+            value = self.rate * dt / (1.0 - foam_decay_factor(dt, self.half_life))
         return float(min(value, self.max_coverage))

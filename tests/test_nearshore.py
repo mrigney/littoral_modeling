@@ -552,9 +552,10 @@ def test_foam_equilibrium_matches_the_geometric_series(record, fine_beach, surf,
     predicted = model.equilibrium_coverage(0.25)
 
     record("5", "equilibrium foam coverage in a breaking cell", measured, predicted,
-           1e-6, note=f"seed_rate = {model.seed_rate}/s. Continuous-limit value "
+           1e-6, note=f"equilibrium {model.equilibrium}, so rate = {model.rate:.4f}/s. "
+                      f"Continuous-limit value "
                       f"is {model.equilibrium_coverage():.4f}, which is what to "
-                      f"reason about when choosing seed_rate since it does not "
+                      f"reason about when choosing coverage since it does not "
                       f"depend on the step size.",
            passed=abs(measured - predicted) < 1e-6)
     assert abs(measured - predicted) < 1e-6
@@ -773,3 +774,62 @@ def test_bathymetry_crop_preserves_world_coordinates(record, cfg):
     # Out-of-range requests clamp rather than produce a degenerate grid.
     edge = parent.crop((x0 - 1e6, x0 - 1e5), (y0 - 1e6, y0 - 1e5))
     assert edge.meta.shape[0] >= 2 and edge.meta.shape[1] >= 2
+
+
+def test_foam_does_not_saturate_at_any_half_life(record, fine_beach):
+    """Equilibrium coverage must be invariant to the half life.
+
+    Regression test. The model used to take a fixed `seed_rate` in 1/s, but
+    seeding and decay are tied together -- a cell converges to
+    `seed_rate * t_half / ln2` -- so a rate tuned at one half life clips at
+    another. The shipped 0.2/s gave 0.87 at 3 s and pinned at 1.0 by 6 s, which
+    left `coastal_bay`'s whole surf band at full coverage with no structure.
+
+    That is not cosmetic once Phase 7 blends BSDFs by this fraction: a saturated
+    band renders as pure foam, no Fresnel and no glint anywhere in the surf.
+    """
+    worst, rows = 0.0, []
+    for half_life in (1.0, 3.0, 6.0, 12.0, 30.0):
+        model = foam_mod.FoamModel(bathy=fine_beach, half_life=half_life,
+                                   equilibrium=0.85)
+        eq = model.equilibrium_coverage()
+        worst = max(worst, abs(eq - 0.85))
+        rows.append(f"{half_life:g}s: {eq:.3f}")
+        assert eq < model.max_coverage, f"saturated at t_half={half_life}"
+
+    record("5", "foam equilibrium across half lives 1-30 s (worst deviation)",
+           worst, 0.0, 1e-9,
+           note="Target 0.85. " + ", ".join(rows) + ". The rate is derived from "
+                "the target and the half life, so the coverage a breaking cell "
+                "reaches no longer depends on how long foam survives.",
+           passed=worst < 1e-9)
+    assert worst < 1e-9
+
+    # A fixed rate is what used to break: keep the failure mode documented.
+    legacy = foam_mod.FoamModel(bathy=fine_beach, half_life=6.0, seed_rate=0.2)
+    assert legacy.equilibrium_coverage() >= legacy.max_coverage, (
+        "the old fixed-rate behaviour should still saturate; if it does not, "
+        "this test is no longer pinning what it was written for")
+
+
+def test_shipped_configs_do_not_saturate_foam(record, cfg):
+    """Every scene that ships must leave headroom in the foam channel."""
+    from pathlib import Path
+
+    from pywave import load_config
+    from pywave.bathymetry import Bathymetry
+
+    rows = []
+    for path in sorted((Path(__file__).resolve().parent.parent / "configs").glob("*.yaml")):
+        c = load_config(path)
+        if c.bathymetry.is_export and not Path(c.bathymetry.source).exists():
+            continue
+        b = Bathymetry.from_config(c, fine=True)
+        model = foam_mod.FoamModel(bathy=b, half_life=c.nearshore.foam_halflife,
+                                   equilibrium=c.nearshore.foam_coverage)
+        eq = model.equilibrium_coverage()
+        rows.append(f"{path.stem}: t_half {c.nearshore.foam_halflife:g}s -> {eq:.3f}")
+        assert eq < model.max_coverage, f"{path.stem} saturates its foam channel"
+
+    record("5", "shipped configs, foam equilibrium", len(rows),
+           note="; ".join(rows) + ". All below the clip ceiling.")
