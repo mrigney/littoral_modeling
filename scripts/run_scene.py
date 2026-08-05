@@ -379,10 +379,23 @@ def _default_region(scene, posts: int = 900):
     b = scene.fine_bathy
     x0b, x1b, y0b, y1b = b.meta.extent
 
-    cx, shore = scene.shore_ref
+    cx, cy = scene.shore_ref
+    axis, sign = scene.offshore_axis
 
-    return (max(cx - 0.5 * span, x0b), max(shore - 0.75 * span, y0b),
-            min(cx + 0.5 * span, x1b), min(shore + 0.1 * span, y1b))
+    # Three quarters of the window offshore, a quarter inland, along whichever
+    # axis the coast faces. Building it toward -Y unconditionally is correct for
+    # a south-facing beach and puts the mesh almost entirely on land for a
+    # north-facing one -- which is a valid rectangle in the wrong place, so
+    # nothing complains.
+    far, near = 0.75 * span * sign, -0.25 * span * sign
+    if axis == 1:
+        y_lo, y_hi = sorted((cy + far, cy + near))
+        x_lo, x_hi = cx - 0.5 * span, cx + 0.5 * span
+    else:
+        x_lo, x_hi = sorted((cx + far, cx + near))
+        y_lo, y_hi = cy - 0.5 * span, cy + 0.5 * span
+
+    return (max(x_lo, x0b), max(y_lo, y0b), min(x_hi, x1b), min(y_hi, y1b))
 
 
 def main() -> int:
@@ -506,7 +519,8 @@ def main() -> int:
         print(f"  terrain {tstats['n_vertices']:>9,} v {tstats['n_faces']:>9,} f")
 
         params = pw_export.mitsuba_scene_params(
-            "water_0000.ply", "terrain_0000.ply", water_mesh=wm, terrain_mesh=tm)
+            "water_0000.ply", "terrain_0000.ply", water_mesh=wm, terrain_mesh=tm,
+            offshore=scene.offshore)
         written["scene_py"] = pw_export.write_mitsuba_scene(
             mesh_dir / "scene.py", "water_0000.ply", "terrain_0000.ply",
             params=params)

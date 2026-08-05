@@ -833,3 +833,54 @@ def test_shipped_configs_do_not_saturate_foam(record, cfg):
 
     record("5", "shipped configs, foam equilibrium", len(rows),
            note="; ".join(rows) + ". All below the clip ceiling.")
+
+
+def test_offshore_waves_are_not_annihilated(record, beach, cfg):
+    """A wave heading away from the shore keeps its height.
+
+    Regression test. `refraction_angle` returns an offshore-bound wave
+    unrefracted, so the ray-spacing ratio is exactly 1 -- no convergence, no
+    divergence. `refraction_coefficient` used to clamp `cos(alpha_deep)` at zero
+    instead, which sends `Kr` to 0 and does not attenuate the wave so much as
+    delete it.
+
+    Invisible on an open coast, where the wind blows onshore everywhere. On a
+    closed basin it removes the sea from the whole downwind shore: measured on a
+    real lake export, 47% of wet cells had exactly zero wave height, and every
+    quantity downstream of `Kr` is a product so the zero propagated in silence.
+    """
+    for deg in (100.0, 135.0, 179.0):
+        a = np.radians(deg)
+        kr = float(nearshore.refraction_coefficient(a, a))
+        assert kr == pytest.approx(1.0, abs=1e-9), (
+            f"offshore wave at {deg} deg got Kr = {kr}")
+
+    # Normal incidence is untouched, and oblique shoreward waves still spread.
+    assert float(nearshore.refraction_coefficient(0.0, 0.0)) == pytest.approx(1.0)
+    assert float(nearshore.refraction_coefficient(np.radians(60.0),
+                                                  np.radians(30.0))) < 1.0
+
+    # End to end: no wet sample may lose its wave height, whichever way the
+    # shore faces relative to the wind.
+    from dataclasses import replace
+
+    from pywave import tiling as _t
+
+    worst_zero = 0.0
+    for wind_deg in (45.0, 135.0, 225.0, 315.0):
+        c = replace(cfg, wind=replace(cfg.wind, direction_rad=np.radians(wind_deg)))
+        ts = _t.TileSet.build(c)
+        x = np.linspace(50.0, 950.0, 60)
+        y = np.linspace(200.0, 399.0, 60)
+        X, Y = np.meshgrid(x, y, indexing="xy")
+        nf = nearshore.transform(ts, beach, c, X.ravel(), Y.ravel(), 0.0)
+        wet = nf.depth > 0.0
+        dead = float((nf.hs_local[wet] < 1e-9).mean()) if wet.any() else 0.0
+        worst_zero = max(worst_zero, dead)
+
+    record("5", "wet samples with zero wave height, winds all round", worst_zero,
+           0.0, 0.0,
+           note="Four wind directions including two blowing offshore. Any "
+                "non-zero fraction here means Kr is deleting the sea somewhere.",
+           passed=worst_zero == 0.0)
+    assert worst_zero == 0.0

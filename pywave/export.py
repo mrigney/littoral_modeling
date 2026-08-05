@@ -263,7 +263,8 @@ def mitsuba_scene_params(water_ply, terrain_ply, *, water_mesh=None,
                          terrain_mesh=None, width: int = 1280, height: int = 720,
                          spp: int = 128, fov: float = 45.0,
                          sun_azimuth_deg: float = 135.0,
-                         sun_elevation_deg: float = 35.0) -> dict:
+                         sun_elevation_deg: float = 35.0,
+                         offshore=None) -> dict:
     """Everything the scene needs, as plain numbers.
 
     The camera is placed from the meshes' own bounds -- offshore, elevated,
@@ -279,10 +280,16 @@ def mitsuba_scene_params(water_ply, terrain_ply, *, water_mesh=None,
     cx, cy = 0.5 * (lo[0] + hi[0]), 0.5 * (lo[1] + hi[1])
     span = float(max(hi[0] - lo[0], hi[1] - lo[1]))
 
-    # Water lies at lower Y than the shore, so "offshore" is -Y.  Stand back and
-    # up, and aim a little landward of centre to keep the waterline in frame.
-    target = [float(cx), float(cy + 0.15 * span), float(0.5 * (lo[2] + hi[2]))]
-    origin = [float(cx), float(lo[1] - 0.35 * span), float(hi[2] + 0.22 * span)]
+    # Stand offshore, elevated, aimed a little landward of centre so the
+    # waterline stays in frame. `offshore` comes from the shore normal; the
+    # default is -Y, which is the synthetic beaches' orientation and is wrong
+    # for any coast that faces the other way.
+    v = np.asarray(offshore if offshore is not None else (0.0, -1.0), float)
+    v = v / max(float(np.hypot(*v)), 1e-9)
+    target = [float(cx - 0.15 * span * v[0]), float(cy - 0.15 * span * v[1]),
+              float(0.5 * (lo[2] + hi[2]))]
+    origin = [float(cx + 0.55 * span * v[0]), float(cy + 0.55 * span * v[1]),
+              float(hi[2] + 0.22 * span)]
 
     alpha = 0.1
     if water_mesh is not None and "mss" in water_mesh.channels:
@@ -303,6 +310,7 @@ def mitsuba_scene_params(water_ply, terrain_ply, *, water_mesh=None,
         "water_ior": 1.333,
         "terrain_reflectance": [0.52, 0.46, 0.35],
         "sky_radiance": [0.35, 0.45, 0.60],
+        "offshore": [float(v[0]), float(v[1])],
         "sun": {"direction": sun, "irradiance": [4.0, 3.8, 3.4],
                 "azimuth_deg": float(sun_azimuth_deg),
                 "elevation_deg": float(sun_elevation_deg)},

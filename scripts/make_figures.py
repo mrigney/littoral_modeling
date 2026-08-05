@@ -167,6 +167,44 @@ class Scene:
         return self._memo("shore_ref", make)
 
     @property
+    def offshore(self):
+        """Unit vector pointing **offshore** from :attr:`shore_ref`.
+
+        The opposite of the inland shore normal there.  Every window, transect
+        and camera in the toolchain used to assume offshore was -Y, which is
+        true of the synthetic beaches and of nothing else: a coast facing north
+        put the mesh region 86% on dry land, silently, because a rectangle built
+        the wrong way from a correct shoreline point is still a valid rectangle.
+        """
+        def make():
+            x, y = self.shore_ref
+            _, _, normal = self.bathy.sample(np.array([x]), np.array([y]))
+            v = -np.array([float(normal[0][0]), float(normal[1][0])])
+            n = float(np.hypot(*v))
+            return (v / n) if n > 1e-9 else np.array([0.0, -1.0])
+
+        return self._memo("offshore", make)
+
+    @property
+    def offshore_axis(self):
+        """``(axis, sign)`` of the dominant offshore direction.
+
+        ``axis`` is 0 for X or 1 for Y; ``sign`` is +1 or -1.  Regions and
+        animation windows stay axis-aligned rectangles, so they follow whichever
+        axis the coast mostly faces rather than an arbitrary bearing.
+        """
+        v = self.offshore
+        axis = 0 if abs(v[0]) > abs(v[1]) else 1
+        return axis, (1.0 if v[axis] >= 0 else -1.0)
+
+    def offshore_line(self, length: float, n: int = 400, start: float = 0.05):
+        """``(x, y)`` running from just inside the waterline out to ``length``."""
+        x0, y0 = self.shore_ref
+        v = self.offshore
+        t = np.linspace(start, length, n)
+        return x0 + v[0] * t, y0 + v[1] * t
+
+    @property
     def swash_band(self) -> float:
         """Horizontal swash excursion [m], from Hunt runup on this beach."""
         slope = self.bathy.beach_slope()
@@ -199,11 +237,8 @@ class Scene:
 
     def surf_transect(self, n: int = 1200):
         """``(x, y)`` running from just inside the waterline to well offshore."""
-        b = self.fine_bathy
-        x0, y_shore = self.shore_ref
         reach = max(30.0 * self.swash_band, 12.0)
-        y = np.linspace(y_shore - 0.05, max(y_shore - reach, b.meta.extent[2]), n)
-        return np.full(n, x0), y
+        return self.offshore_line(reach, n)
 
 
 def _style(ax, title=None, xlabel=None, ylabel=None, legend=False):
@@ -586,10 +621,7 @@ def fig_shoaling(scene):
     _style(ax, "Shoaling coefficient", "still-water depth [m]", "$K_s$ [-]", legend=True)
 
     ax = axes[1]
-    x_shore, shore = scene.shore_ref
-    x = np.full(400, x_shore)
-    y = np.linspace(shore - 0.4, max(shore - 40.0 * cfg.lambda_p,
-                                     beach.meta.extent[2]), 400)
+    x, y = scene.offshore_line(40.0 * cfg.lambda_p, 400, start=0.4)
     depth, _, normal = beach.sample(x, y)
     for wind_deg, col in ((10.0, "#9dc3d4"), (45.0, ACCENT), (135.0, ACCENT3),
                           (170.0, ACCENT2)):
@@ -631,7 +663,7 @@ def fig_nearshore(scene):
 
     x, y = scene.surf_transect()
     nf = nearshore.transform(ts, beach, cfg_on, x, y, 0.0)
-    offshore = scene.shore_ref[1] - y
+    offshore = np.hypot(x - scene.shore_ref[0], y - scene.shore_ref[1])
 
     fig, axes = plt.subplots(2, 2, figsize=(11.5, 6.4))
 

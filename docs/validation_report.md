@@ -4,12 +4,12 @@
 
 | | |
 |---|---|
-| generated | 2026-08-05 00:32:36 UTC |
-| git_sha | `2b75d62ea67c6e3a4f8e691378465c14e243613e` |
+| generated | 2026-08-05 00:57:31 UTC |
+| git_sha | `a7c3704bfd1578c02db47544bdd18ad33cae68f3 (working tree dirty)` |
 | scene | `configs/test_lake.yaml` |
 | python | 3.14.5 (Windows AMD64) |
 | numpy / scipy | 2.5.1 / 1.18.0 |
-| checks recorded | 126 |
+| checks recorded | 127 |
 | exit status | PASS |
 
 Every number below was measured by the test suite against the implementation in this commit. Tolerances are the gate criteria from `littoral-water-implementation-cookbook.md`, except where a deviation is recorded in [Gate deviations](#gate-deviations).
@@ -197,6 +197,7 @@ Notes:
 | cropped vs parent bathymetry, worst sampling difference | 0 | 0 | -- | 1.0e-12 | PASS |
 | foam equilibrium across half lives 1-30 s (worst deviation) | 0 | 0 | -- | 1.0e-09 | PASS |
 | shipped configs, foam equilibrium | 3 | -- | -- | -- | PASS |
+| wet samples with zero wave height, winds all round | 0 | 0 | -- | 0.0e+00 | PASS |
 
 Notes:
 
@@ -233,6 +234,7 @@ Notes:
 - **cropped vs parent bathymetry, worst sampling difference** -- Parent (200, 4000), crop (81, 1001). The crop carries its own origin, so world coordinates are unchanged.
 - **foam equilibrium across half lives 1-30 s (worst deviation)** -- Target 0.85. 1s: 0.850, 3s: 0.850, 6s: 0.850, 12s: 0.850, 30s: 0.850. The rate is derived from the target and the half life, so the coverage a breaking cell reaches no longer depends on how long foam survives.
 - **shipped configs, foam equilibrium** -- coastal_bay: t_half 6s -> 0.850; houdini_lake: t_half 3s -> 0.850; test_lake: t_half 3s -> 0.850. All below the clip ceiling.
+- **wet samples with zero wave height, winds all round** -- Four wind directions including two blowing offshore. Any non-zero fraction here means Kr is deleting the sea somewhere.
 
 ## Gate 6 -- mesh generation and export
 

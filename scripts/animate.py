@@ -189,15 +189,23 @@ class Shoreline:
         cross = max(25.0 * scene.swash_band, 6.0 * cfg.lambda_p,
                     40.0 * self.bathy.meta.dx)
         along = cross * 1.5
-        x0, shore = scene.shore_ref
+        x0, y0c = scene.shore_ref
+        axis, sign = scene.offshore_axis
 
         nx = px
         ny = max(int(px * cross / along), 64)
-        xs = np.linspace(x0 - 0.5 * along, x0 + 0.5 * along, nx)
-        # Put the waterline about a third of the way down rather than hard
-        # against the top edge: the surf band and the swash are the subject, and
-        # they sit within a metre or two of it.
-        ys = np.linspace(shore - 0.68 * cross, shore + 0.32 * cross, ny)
+        # A third of the window inland, two thirds offshore -- the surf band and
+        # the swash are the subject and both sit within a metre or two of the
+        # waterline, so it does not belong hard against an edge. Which way is
+        # "offshore" comes from the shore normal, not from an assumption: a
+        # coast facing north needs the window built the opposite way round.
+        near, far = -0.32 * cross * sign, 0.68 * cross * sign
+        if axis == 1:
+            xs = np.linspace(x0 - 0.5 * along, x0 + 0.5 * along, nx)
+            ys = np.linspace(*sorted((y0c + near, y0c + far)), num=ny)
+        else:
+            xs = np.linspace(*sorted((x0 + near, x0 + far)), num=nx)
+            ys = np.linspace(y0c - 0.5 * along, y0c + 0.5 * along, ny)
         self.X, self.Y = np.meshgrid(xs, ys)
         self.mpp = along / nx
 

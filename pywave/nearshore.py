@@ -187,7 +187,7 @@ def refraction_angle(theta_deep, shore_normal, depth, omega, g: float = G):
 
 
 def refraction_coefficient(alpha_deep, alpha_local) -> np.ndarray:
-    """``Kr = sqrt(cos(alpha_deep) / cos(alpha_local))`` -- ray convergence.
+    """``Kr = sqrt(|cos(alpha_deep)| / |cos(alpha_local)|)`` -- ray convergence.
 
     Between two adjacent rays the spacing scales as ``cos(alpha)``, so as a wave
     turns toward the normal the rays *spread* along the shore and the height
@@ -196,12 +196,31 @@ def refraction_coefficient(alpha_deep, alpha_local) -> np.ndarray:
     ones.
 
     Total local height is ``H = H_deep * Ks * Kr``.
+
+    Waves travelling offshore
+    -------------------------
+    Absolute values, and the reason is not cosmetic.  A wave heading *away* from
+    the shore is returned unrefracted by :func:`refraction_angle`
+    (``alpha_local == alpha_deep``), and the ray-spacing ratio is then exactly
+    1 -- no convergence, no divergence.  Taking ``max(cos(alpha_deep), 0)``
+    instead sends ``Kr`` to **zero** there, which does not attenuate the wave so
+    much as delete it.
+
+    That is invisible on an open coast, where the wind blows onshore everywhere
+    and the case never arises.  On a closed basin it removes the sea from the
+    entire downwind half of the shoreline: measured on a real lake export,
+    47% of wet cells had exactly zero wave height, silently, because every
+    quantity downstream of ``Kr`` is a product and zero propagates quietly.
     """
-    ca = np.cos(np.asarray(alpha_deep, dtype=np.float64))
-    cl = np.cos(np.asarray(alpha_local, dtype=np.float64))
+    ca = np.abs(np.cos(np.asarray(alpha_deep, dtype=np.float64)))
+    cl = np.abs(np.cos(np.asarray(alpha_local, dtype=np.float64)))
+    # Grazing incidence sends the ratio to infinity. It cannot arise for a
+    # shoreward wave -- refraction turns toward the normal, so |cos| only grows
+    # -- and for anything else the honest answer is "no refraction applied".
+    safe = cl > 1e-6
     with np.errstate(divide="ignore", invalid="ignore"):
-        kr = np.sqrt(np.maximum(ca, 0.0) / np.where(cl > 1e-9, cl, 1.0))
-    return np.where(cl > 1e-9, kr, 0.0)
+        kr = np.sqrt(ca / np.where(safe, cl, 1.0))
+    return np.where(safe, kr, 1.0)
 
 
 def refraction_angle_blend(theta_deep, shore_normal, depth, d_ref: float):
