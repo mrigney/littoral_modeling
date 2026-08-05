@@ -4,12 +4,12 @@
 
 | | |
 |---|---|
-| generated | 2026-08-05 02:55:09 UTC |
-| git_sha | `cfd6965077024a6883581468e4dd635c77ac8866 (working tree dirty)` |
+| generated | 2026-08-05 04:12:25 UTC |
+| git_sha | `438ac842b00ed3f603c697ff2ac0a5710fd67c97 (working tree dirty)` |
 | scene | `configs/test_lake.yaml` |
 | python | 3.14.5 (Windows AMD64) |
 | numpy / scipy | 2.5.1 / 1.18.0 |
-| checks recorded | 128 |
+| checks recorded | 133 |
 | exit status | PASS |
 
 Every number below was measured by the test suite against the implementation in this commit. Tolerances are the gate criteria from `littoral-water-implementation-cookbook.md`, except where a deviation is recorded in [Gate deviations](#gate-deviations).
@@ -264,6 +264,11 @@ Notes:
 | bed slope, median | 1.8359 deg | -- | -- | -- | PASS |
 | Mitsuba scene Beckmann alpha | 0.1983 | 0.1983 | 0.00e+00 | 1.0e-04 | PASS |
 | Mitsuba XML scene parses | yes | yes | -- | -- | PASS |
+| water clearance above the terrain mesh | 0.003487 m | -- | -- | -- | PASS |
+| read_ply_any: ascii | 0 m | -- | -- | -- | PASS |
+| read_ply_any: big-endian, mixed double/float | 0 m | -- | -- | -- | PASS |
+| read_ply_any: quad, fan-triangulated | 0 m | -- | -- | -- | PASS |
+| read_ply_any vs read_ply on our own PLY | 0 | -- | -- | -- | PASS |
 
 Notes:
 
@@ -287,6 +292,11 @@ Notes:
 - **bed slope, median** -- Range 1.4-6.7 deg. Dean profile with A = 0.100, steepening toward the waterline.
 - **Mitsuba scene Beckmann alpha** -- sqrt of the mean per-vertex mss, baked to a constant because a stock BSDF cannot read mesh attributes. Phase 7 reads mss per vertex instead. The scene itself is UNTESTED against Mitsuba, which is not installed here.
 - **Mitsuba XML scene parses** -- Both scene forms are generated from one set of parameters, so the XML and the Python dict cannot drift apart.
+- **water clearance above the terrain mesh** -- 19521 wet vertices, both meshes at 0.25 m. 0 below the bed. Coarsening the terrain relative to the water breaks this: at 2x coarser, 0.029% of vertices poke through by up to 8.5 cm near the waterline.
+- **read_ply_any: ascii** -- 2 triangles recovered
+- **read_ply_any: big-endian, mixed double/float** -- 2 triangles recovered
+- **read_ply_any: quad, fan-triangulated** -- 2 triangles recovered
+- **read_ply_any vs read_ply on our own PLY** -- 13 channels, 2400 faces
 
 ## Gate deviations
 

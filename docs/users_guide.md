@@ -331,6 +331,9 @@ Writes into `runs/<scene>/mesh/`:
 |---|---|---|
 | `--mesh-dx D` | `output.mesh_dx` | Post spacing, metres |
 | `--mesh-region X0 Y0 X1 Y1` | shoreline window | Bound the mesh, scene coordinates |
+| `--mesh-full` | off | Mesh the **whole domain** instead of a window |
+| `--terrain-dx D` | the water spacing | Bed post spacing — see the warning below |
+| `--terrain-ply PATH` | off | Use *your* bed mesh; don't build one |
 | `--mesh-t T` | `0.0` | Scenario time of the frame |
 | `--mesh-obj` | off | Also write an OBJ (geometry only) |
 | `--mesh-max-vertices N` | 12,000,000 | Raise the guard on a big machine |
@@ -357,6 +360,91 @@ clipped to the water body.
 
 `--mesh-t` is free: the surface is a pure function of `t`, so frame 12.5 s costs
 exactly what frame 0 costs.
+
+### Meshing the whole domain
+
+When the camera position is not known in advance, bounding a region is no use.
+`--mesh-full` meshes everything, still clipped to the water body:
+
+```bash
+python scripts/run_scene.py configs/houdini_lake.yaml --mesh --mesh-full \
+       --mesh-dx 0.5 --mesh-max-vertices 60000000
+```
+
+The vertex guard exists to stop an accidental 60 M-post job, so a deliberate one
+has to raise it. `run_scene.py` prints an estimate before it starts building.
+For the 1 km² shipped lake, 20.5% of it wet:
+
+| `--mesh-dx` | Water verts | Bed verts | Water PLY | Bed PLY | Build |
+|---|---|---|---|---|---|
+| 1 m | 0.21 M | 1.05 M | 0.02 GB | 0.07 GB | 4 s |
+| 0.5 m | 0.86 M | 4.19 M | 0.07 GB | 0.28 GB | 17 s |
+| 0.25 m | 3.43 M | 16.8 M | 0.27 GB | 1.11 GB | 69 s |
+| 0.125 m | 13.7 M | 67.1 M | 1.07 GB | 4.43 GB | 275 s |
+
+The bed dominates, because water covers only the wet fifth while terrain covers
+all of it. That makes coarsening the bed with `--terrain-dx` very tempting.
+**Don't** — read the next section first.
+
+### Keeping the water above the bed
+
+Every clearance guarantee inside `pywave` is between the water surface and the
+**depth field**. Your renderer sees neither: it sees two triangle meshes, which
+agree with that field only as closely as their own resolution allows. Two ways
+to break it, both measured on the shipped lake:
+
+| What differs | Water verts below the bed | Worst |
+|---|---|---|
+| Bed mesh 2× coarser than the water mesh | 0.029% | 8.5 cm |
+| Bed built from fields 2× coarser than itself | 0.24% | 0.70 m |
+| Bed built from fields 4× coarser than itself | 0.69% | 1.97 m |
+
+Both cluster within a few tens of centimetres of the waterline, where the
+foreshore is steepest — the most visible place in the scene. On this lake
+`Hs` is 8.5 cm, so the second row is eight wave heights of bed sticking through.
+
+The two rows are different failures. The first is interpolation: the same field
+read at two spacings. The second is **information** — the water's height limit
+is computed from the `.npy` fields, so bed detail the fields never saw is detail
+the water does not know to stay above. Note that `bathymetry.surf_dx` does not
+help; it refines the surf zone by interpolating the export, which adds
+resolution but no new bed.
+
+So:
+
+- **Leave `--terrain-dx` alone.** It defaults to the water spacing, and at
+  matching spacing both meshes are linear over the same triangles, so the depth
+  limiter's guarantee carries through. Measured: zero intrusions in 858 k
+  vertices, minimum clearance +23 µm.
+- **Export the `.npy` fields at least as fine as any bed mesh you render.**
+
+### Bringing your own terrain mesh
+
+The bed is static, so if the tool that authored the terrain can write a PLY
+directly, that mesh is usually better than one this package regrids — and it
+saves building millions of bed posts on every run.
+
+```bash
+python scripts/run_scene.py configs/houdini_lake.yaml --mesh --mesh-full \
+       --terrain-ply /path/from/houdini/terrain.ply
+```
+
+`pywave` then skips the bed entirely and writes `scene.py` / `scene.xml`
+pointing at your file. **Whether it lines up is now yours to check**, and given
+the table above it is worth checking rather than assuming:
+
+```bash
+python scripts/check_clearance.py runs/<scene>/mesh/water_0000.ply \
+                                  /path/from/houdini/terrain.ply
+```
+
+It reads any PLY a DCC tool is likely to write — ASCII or binary, either byte
+order, arbitrary properties, quads — recognises a lattice and samples it
+directly (seconds), and falls back to general point location otherwise. It
+reports the clearance distribution and exits non-zero if the bed shows through.
+*Where* the intrusions sit tells you which problem you have: near the waterline
+means a resolution mismatch, out in deep water means the coordinate system or
+`water_level` disagrees.
 
 ### The PLY
 
@@ -676,7 +764,10 @@ frequency moment. See [algorithms.md §2](algorithms.md#2-conventions).
 |---|---|
 | `exceeds max_vertices` | Coarsen `--mesh-dx`, shrink `--mesh-region`, or raise the guard |
 | `no wet cells in region` | The region misses the water; check it against `summary.md`'s extents |
-| Mesh is a thin strip | The default region is a shoreline window — pass `--mesh-region` |
+| Mesh is a thin strip | The default region is a shoreline window — pass `--mesh-region` or `--mesh-full` |
+| Bed pokes through the water at the shore | Fields coarser than the bed mesh; see §6 and run `check_clearance.py` |
+| Bed pokes through in deep water | Not a resolution problem — the meshes disagree on `water_level` or CRS |
+| `lie outside the bed mesh` | The bed does not cover the water; it must be at least as large |
 | `scene.water_level is X but ... z_w = Y` | Make them match; see §5 |
 | `does not name a terrain export` | The message lists every path tried |
 | `no shoreline` | The export is all water or all land |

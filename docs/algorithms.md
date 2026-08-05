@@ -1106,6 +1106,35 @@ exists only as a sampled grid, with a shoreline from a distance transform rather
 than a closed form, so there is no analytic slope to prefer and a central
 difference is the honest answer.
 
+### Where the clearance guarantee actually lives
+
+The depth limiter of §12 bounds the surface against the **depth field**. A
+renderer never sees that field; it sees two triangle meshes. The guarantee
+transfers only when both meshes are linear over the same triangles — which is
+why terrain defaults to the water's spacing rather than to the bathymetry's own,
+even though the bed is the term that dominates a full-domain mesh.
+
+Two independent ways to break it, both measured on the 1 m lake export with the
+water meshed at 0.5 m:
+
+| Mismatch | Water vertices below the bed | Worst intrusion |
+|---|---|---|
+| none — both meshes at 0.5 m from 1 m fields | 0 of 857,930 | — (min +23 µm) |
+| bed meshed at 1 m, water at 0.5 m | 0.029% | 8.5 cm |
+| bed from fields decimated to 2 m | 0.24% | 0.70 m |
+| bed from fields decimated to 4 m | 0.69% | 1.97 m |
+
+All of it within a metre of the waterline, where the foreshore is steepest.
+
+The first mismatch is interpolation — one field read at two spacings, and the
+disagreement is bounded by the field's curvature over a cell. The second is
+**information**: the limiter can only hold the surface above bed it was told
+about, so any detail finer than the `.npy` export is detail it cannot defend
+against. `surf_dx` does not help, since it interpolates the export rather than
+adding to it. This matters as soon as the bed mesh comes from elsewhere — a PLY
+written by the tool that authored the terrain, at a resolution unrelated to the
+fields. `scripts/check_clearance.py` measures any such pair directly.
+
 ### Verification
 
 | Check | Measured | Tolerance |
@@ -1114,6 +1143,7 @@ difference is the honest answer.
 | Minimum normal `z` | 0.88 | > 0 |
 | Wet posts not meshed | 0 | 0 |
 | Onshore clearance below the bed | ≥ 0 | ≥ 0 |
+| Water clearance above the **terrain mesh** | 0 below, of 857,930 | 0 below |
 | Analytic vs face normals | 4.3° mean | < 15° |
 | Rebuilt frame difference | 0 | 0 |
 

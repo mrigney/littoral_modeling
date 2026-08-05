@@ -36,7 +36,8 @@ import numpy as np
 from .channels import CHANNEL_UNITS
 
 __all__ = ["write_ply", "write_obj", "write_frame_metadata", "export_frame",
-           "read_ply", "mitsuba_scene_params", "mitsuba_scene_dict",
+           "read_ply", "read_ply_any",
+           "mitsuba_scene_params", "mitsuba_scene_dict",
            "write_mitsuba_scene", "write_mitsuba_xml",
            "write_terrain_export"]
 
@@ -144,6 +145,162 @@ def read_ply(path):
 
     data = {n: np.array(verts[n]) for n in names}
     return data, np.array(faces["v"])
+
+
+_PLY_DTYPES = {
+    "char": "i1", "int8": "i1", "uchar": "u1", "uint8": "u1",
+    "short": "i2", "int16": "i2", "ushort": "u2", "uint16": "u2",
+    "int": "i4", "int32": "i4", "uint": "u4", "uint32": "u4",
+    "float": "f4", "float32": "f4", "double": "f8", "float64": "f8",
+}
+
+
+def read_ply_any(path):
+    """Read a PLY written by *someone else* -- Houdini, MeshLab, Blender.
+
+    :func:`read_ply` deliberately only understands this package's own output.
+    This one is the counterpart for meshes arriving from a DCC tool: ASCII or
+    binary, either byte order, any property names and types, and polygons of
+    any size (fan-triangulated). It exists because a terrain mesh authored in
+    Houdini is often better than one this package regrids, but it has to be
+    checked against the water surface before it can be trusted -- see
+    ``scripts/check_clearance.py``.
+
+    Returns ``(channels, faces)`` exactly like :func:`read_ply`: a dict of
+    ``float64`` arrays keyed by property name, and an ``(F, 3)`` index array.
+    """
+    path = Path(path)
+    with path.open("rb") as fh:
+        if fh.readline().strip() != b"ply":
+            raise ValueError(f"{path} is not a PLY file")
+
+        fmt, elements, order = None, [], "<"
+        while True:
+            line = fh.readline()
+            if not line:
+                raise ValueError("unexpected end of PLY header")
+            p = line.split()
+            if not p or p[0] == b"comment" or p[0] == b"obj_info":
+                continue
+            if p[0] == b"end_header":
+                break
+            if p[0] == b"format":
+                fmt = p[1].decode("ascii")
+                order = {"binary_little_endian": "<",
+                         "binary_big_endian": ">", "ascii": "|"}.get(fmt)
+                if order is None:
+                    raise ValueError(f"unsupported PLY format: {fmt}")
+            elif p[0] == b"element":
+                elements.append((p[1].decode("ascii"), int(p[2]), []))
+            elif p[0] == b"property":
+                if not elements:
+                    raise ValueError("property outside any element")
+                if p[1] == b"list":
+                    elements[-1][2].append(
+                        ("list", p[2].decode("ascii"), p[3].decode("ascii"),
+                         p[4].decode("ascii")))
+                else:
+                    elements[-1][2].append(
+                        ("scalar", p[1].decode("ascii"), p[2].decode("ascii")))
+
+        if fmt == "ascii":
+            data = _read_ply_ascii(fh, elements)
+        else:
+            data = _read_ply_binary(fh, elements, order)
+
+    if "vertex" not in data:
+        raise ValueError(f"{path} has no vertex element")
+    channels = {k: np.asarray(v, dtype=np.float64)
+                for k, v in data["vertex"].items()}
+    for axis in "xyz":
+        if axis not in channels:
+            raise ValueError(f"{path} vertex element has no '{axis}' property")
+
+    faces = data.get("face", {}).get("__list__")
+    if faces is None:
+        raise ValueError(f"{path} has no face element with an index list")
+    return channels, _fan_triangulate(faces)
+
+
+def _read_ply_binary(fh, elements, order):
+    out = {}
+    for name, count, props in elements:
+        if all(p[0] == "scalar" for p in props):
+            dt = np.dtype([(p[2], order + _PLY_DTYPES[p[1]]) for p in props])
+            buf = fh.read(count * dt.itemsize)
+            if len(buf) < count * dt.itemsize:
+                raise ValueError(f"PLY truncated in element '{name}'")
+            arr = np.frombuffer(buf, dtype=dt, count=count)
+            out[name] = {p[2]: arr[p[2]] for p in props}
+            continue
+
+        # An element with a list property: the row length is data-dependent.
+        # Faces are overwhelmingly uniform, so try the fast path -- read one
+        # row, assume the rest match, and verify -- before falling back.
+        if len(props) != 1 or props[0][0] != "list":
+            raise ValueError(f"element '{name}' mixes list and scalar "
+                             "properties, which is not supported")
+        _, cnt_t, idx_t, _ = props[0]
+        cnt_dt = np.dtype(order + _PLY_DTYPES[cnt_t])
+        idx_dt = np.dtype(order + _PLY_DTYPES[idx_t])
+        start = fh.tell()
+        n = int(np.frombuffer(fh.read(cnt_dt.itemsize), dtype=cnt_dt)[0])
+        fh.seek(start)
+        row = np.dtype([("n", cnt_dt), ("v", idx_dt, (n,))])
+        buf = fh.read(count * row.itemsize)
+        rows = np.frombuffer(buf, dtype=row, count=count)
+        if len(buf) == count * row.itemsize and np.all(rows["n"] == n):
+            out[name] = {"__list__": np.asarray(rows["v"], dtype=np.int64)}
+        else:
+            fh.seek(start)
+            out[name] = {"__list__": _read_ply_lists_slow(
+                fh, count, cnt_dt, idx_dt)}
+    return out
+
+
+def _read_ply_lists_slow(fh, count, cnt_dt, idx_dt):
+    """Ragged polygons -- one read per face. Rare, so clarity beats speed."""
+    lists = []
+    for _ in range(count):
+        n = int(np.frombuffer(fh.read(cnt_dt.itemsize), dtype=cnt_dt)[0])
+        lists.append(np.frombuffer(fh.read(n * idx_dt.itemsize),
+                                   dtype=idx_dt, count=n).astype(np.int64))
+    return lists
+
+
+def _read_ply_ascii(fh, elements):
+    out = {}
+    for name, count, props in elements:
+        rows = []
+        while len(rows) < count:
+            line = fh.readline()
+            if not line:
+                raise ValueError(f"PLY truncated in element '{name}'")
+            if line.strip():
+                rows.append(line.split())
+        if all(p[0] == "scalar" for p in props):
+            arr = np.array(rows, dtype=np.float64)
+            out[name] = {p[2]: arr[:, i] for i, p in enumerate(props)}
+        else:
+            out[name] = {"__list__": [np.array(r[1:1 + int(r[0])],
+                                               dtype=np.int64) for r in rows]}
+    return out
+
+
+def _fan_triangulate(faces) -> np.ndarray:
+    """Split polygons into triangles about vertex 0, preserving winding."""
+    if isinstance(faces, np.ndarray) and faces.ndim == 2:
+        if faces.shape[1] == 3:
+            return faces
+        faces = list(faces)
+    tris = []
+    for f in faces:
+        if len(f) < 3:
+            continue
+        tris.extend([f[0], f[i], f[i + 1]] for i in range(1, len(f) - 1))
+    if not tris:
+        raise ValueError("no triangles in the face element")
+    return np.asarray(tris, dtype=np.int64)
 
 
 # ---------------------------------------------------------------------------
@@ -296,9 +453,17 @@ def mitsuba_scene_params(water_ply, terrain_ply, *, water_mesh=None,
     sun = [float(-np.cos(az) * np.cos(el)), float(-np.sin(az) * np.cos(el)),
            float(-np.sin(el))]
 
+    # Bare filenames resolve next to the scene file, which is what we want for
+    # meshes this package wrote. A path the caller spelled out is theirs to
+    # keep: a bed supplied from a DCC tool usually lives somewhere else, and
+    # silently reducing it to a basename would point the renderer at nothing.
+    def _ref(p):
+        p = Path(p)
+        return p.name if p.parent in (Path(""), Path(".")) else p.as_posix()
+
     return {
-        "water_ply": Path(water_ply).name,
-        "terrain_ply": Path(terrain_ply).name,
+        "water_ply": _ref(water_ply),
+        "terrain_ply": _ref(terrain_ply),
         "camera": {"origin": origin, "target": target, "up": [0.0, 0.0, 1.0],
                    "fov": float(fov), "fov_axis": "x"},
         "film": {"width": int(width), "height": int(height)},

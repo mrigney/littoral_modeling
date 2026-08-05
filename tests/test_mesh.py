@@ -594,3 +594,130 @@ def test_mitsuba_xml_is_well_formed(record, meshed, terrain, tmp_path):
     record("6", "Mitsuba XML scene parses", "yes", "yes",
            note="Both scene forms are generated from one set of parameters, so "
                 "the XML and the Python dict cannot drift apart.")
+
+
+def test_water_stays_above_the_terrain_mesh(record, cfg):
+    """The exported *pair* must not intersect, not just the water and the field.
+
+    Every other clearance check compares the water surface against the depth
+    field. A renderer sees neither -- it sees two triangle meshes, and they
+    interpolate that field differently the moment their spacings differ.
+
+    Measured on a real export at water 0.5 m / terrain 1 m: 0.029% of water
+    vertices sat as much as 8.5 cm *below* the bed, all within 22 cm of the
+    waterline where the foreshore is steepest. At matching spacing both meshes
+    are linear over the same triangles, so the depth limiter's guarantee carries
+    through to the geometry.
+    """
+    from scipy.ndimage import map_coordinates
+
+    from pywave import tiling
+
+    ts = tiling.TileSet.build(cfg)
+    bathy = Bathymetry.from_config(cfg, fine=True)
+    region = REGION
+
+    water = mesh.build_water_mesh(ts, bathy, cfg, t=0.7, dx=DX, region=region)
+    terrain = mesh.build_terrain_mesh(bathy, cfg, dx=DX, region=region,
+                                      tileset=ts)
+
+    ny, nx = terrain.meta["grid"]
+    tx0, ty0 = terrain.meta["region"][0], terrain.meta["region"][1]
+    tdx = terrain.meta["mesh_dx"]
+    bed_grid = terrain.vertices[:, 2].reshape(ny, nx)
+
+    coords = np.stack([(water.vertices[:, 1] - ty0) / tdx,
+                       (water.vertices[:, 0] - tx0) / tdx])
+    bed = map_coordinates(bed_grid, coords, order=1, mode="nearest")
+
+    wet = water.channels["depth"] > 0.0
+    clearance = (water.vertices[:, 2] - bed)[wet]
+    worst = float(clearance.min())
+    below = int((clearance < 0).sum())
+
+    record("6", "water clearance above the terrain mesh", worst, unit="m",
+           note=f"{int(wet.sum())} wet vertices, both meshes at {DX} m. "
+                f"{below} below the bed. Coarsening the terrain relative to the "
+                f"water breaks this: at 2x coarser, 0.029% of vertices poke "
+                f"through by up to 8.5 cm near the waterline.",
+           passed=below == 0)
+    assert below == 0, f"{below} water vertices are below the terrain mesh"
+    assert worst >= 0.0
+
+
+def _tiny_mesh():
+    v = np.array([[0.0, 0.0, 1.0], [1.0, 0.0, 2.0],
+                  [1.0, 1.0, 3.0], [0.0, 1.0, 4.0]])
+    return v, np.array([[0, 1, 2], [0, 2, 3]])
+
+
+def test_read_ply_any_handles_foreign_files(record, tmp_path):
+    """A bed authored in a DCC tool arrives in a dialect read_ply cannot parse.
+
+    read_ply only understands this package's own output -- all-float32 vertices,
+    uchar+int32 faces, little-endian. Houdini, MeshLab and Blender each write
+    something outside that. This covers the dialects that actually turn up:
+    ASCII, big-endian, mixed property types, and quads needing triangulation.
+    """
+    v, f = _tiny_mesh()
+    cases = {}
+
+    ascii_ply = tmp_path / "ascii.ply"
+    ascii_ply.write_text(
+        "ply\nformat ascii 1.0\ncomment written by a DCC tool\n"
+        "element vertex 4\nproperty float x\nproperty float y\nproperty float z\n"
+        "element face 2\nproperty list uchar int vertex_indices\nend_header\n"
+        + "".join(f"{a} {b} {c}\n" for a, b, c in v)
+        + "".join(f"3 {a} {b} {c}\n" for a, b, c in f), encoding="ascii")
+    cases["ascii"] = ascii_ply
+
+    be = tmp_path / "big_endian.ply"
+    with be.open("wb") as fh:
+        fh.write(b"ply\nformat binary_big_endian 1.0\nelement vertex 4\n"
+                 b"property double x\nproperty double y\nproperty float z\n"
+                 b"element face 2\nproperty list uchar int vertex_indices\n"
+                 b"end_header\n")
+        for a, b_, c in v:
+            fh.write(np.array(a, ">f8").tobytes() + np.array(b_, ">f8").tobytes()
+                     + np.array(c, ">f4").tobytes())
+        for tri in f:
+            fh.write(np.uint8(3).tobytes() + tri.astype(">i4").tobytes())
+    cases["big-endian, mixed double/float"] = be
+
+    quad = tmp_path / "quad.ply"
+    quad.write_text(
+        "ply\nformat ascii 1.0\nelement vertex 4\n"
+        "property float x\nproperty float y\nproperty float z\n"
+        "element face 1\nproperty list uchar int vertex_indices\nend_header\n"
+        + "".join(f"{a} {b} {c}\n" for a, b, c in v) + "4 0 1 2 3\n",
+        encoding="ascii")
+    cases["quad, fan-triangulated"] = quad
+
+    for label, path in cases.items():
+        ch, faces = export.read_ply_any(path)
+        got = np.column_stack([ch["x"], ch["y"], ch["z"]])
+        err = float(np.abs(got - v).max())
+        record("6", f"read_ply_any: {label}", err, unit="m",
+               note=f"{len(faces)} triangles recovered", passed=err == 0.0)
+        assert err == 0.0
+        assert faces.shape == (2, 3)
+        assert set(map(tuple, faces)) == {(0, 1, 2), (0, 2, 3)}
+
+
+def test_read_ply_any_round_trips_our_own_output(record, cfg, tmp_path):
+    """The general reader must agree with the narrow one on our own files."""
+    from pywave import tiling
+
+    ts = tiling.TileSet.build(cfg)
+    bathy = Bathymetry.from_config(cfg, fine=True)
+    m = mesh.build_water_mesh(ts, bathy, cfg, t=0.0, dx=1.0, region=REGION)
+    path = export.write_ply(m, tmp_path / "w.ply")
+
+    strict, sf = export.read_ply(path)
+    loose, lf = export.read_ply_any(path)
+    assert set(strict) == set(loose)
+    worst = max(float(np.abs(loose[k] - strict[k]).max()) for k in strict)
+    record("6", "read_ply_any vs read_ply on our own PLY", worst,
+           note=f"{len(strict)} channels, {len(sf)} faces", passed=worst == 0.0)
+    assert worst == 0.0
+    assert np.array_equal(sf, lf)

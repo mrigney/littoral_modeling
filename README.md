@@ -91,8 +91,25 @@ picture went stale.
 
 ```bash
 python scripts/run_scene.py configs/my_scene.yaml --mesh
-python scripts/run_scene.py configs/my_scene.yaml --mesh \n       --mesh-dx 0.25 --mesh-region 400 380 500 405 --mesh-t 12.5
+python scripts/run_scene.py configs/my_scene.yaml --mesh \
+       --mesh-dx 0.25 --mesh-region 400 380 500 405 --mesh-t 12.5
+
+# whole domain, for renders where the camera is not known in advance
+python scripts/run_scene.py configs/my_scene.yaml --mesh --mesh-full \
+       --mesh-dx 0.5 --mesh-max-vertices 60000000
+
+# ... or bring your own bed, straight out of the tool that authored the terrain
+python scripts/run_scene.py configs/my_scene.yaml --mesh --mesh-full \
+       --terrain-ply /path/from/houdini/terrain.ply
+python scripts/check_clearance.py runs/my_scene/mesh/water_0000.ply \
+       /path/from/houdini/terrain.ply
 ```
+
+The water surface's height limit is computed from the `.npy` fields, not from
+whatever bed mesh you render. Keep the fields at least as fine as that mesh, or
+the bed shows through at the waterline — on the shipped lake, fields 2× coarser
+than the bed put 0.24% of water vertices as much as 70 cm under it. Guide §6 has
+the numbers; `check_clearance.py` verifies any pair.
 
 Writes **three things** into `runs/<scene>/mesh/`:
 
@@ -275,10 +292,11 @@ tests/
   test_mesh.py            PHASE 6: Gate 6 checks
   make_baseline.py        regenerates tests/baseline/ (a deliberate act)
 scripts/
-  run_scene.py     config -> every artifact, in one directory
-  animate.py       open-water and shoreline clips
-  make_figures.py  the eight figures + a markdown gallery
-  make_overview.py one self-contained shareable HTML page
+  run_scene.py       config -> every artifact, in one directory
+  animate.py         open-water and shoreline clips
+  make_figures.py    the eight figures + a markdown gallery
+  make_overview.py   one self-contained shareable HTML page
+  check_clearance.py does the water stay above a given bed mesh?
 configs/
   test_lake.yaml     reference scene: 5 m/s wind, 1 km fetch, straight beach
   coastal_bay.yaml   contrasting scene: 12 m/s, 40 km fetch, embayed shore

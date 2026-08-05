@@ -360,6 +360,24 @@ def write_channels(scene, out_dir: Path) -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _report_mesh_size(scene, region, water_dx, terrain_dx):
+    """Print what the mesh will cost before spending minutes building it."""
+    x0, y0, x1, y1 = region
+    area = (x1 - x0) * (y1 - y0)
+    xa, ya = scene.bathy.meta.axes()
+    X, Y = np.meshgrid(xa, ya, indexing="xy")
+    inside = (X >= x0) & (X <= x1) & (Y >= y0) & (Y <= y1)
+    wet_frac = float((scene.bathy.depth[inside] > 0).mean()) if inside.any() else 0.0
+
+    water_v = area * wet_frac / water_dx**2
+    terrain_v = area / terrain_dx**2
+    print(f"  region {x1 - x0:.0f} x {y1 - y0:.0f} m, {100 * wet_frac:.0f}% wet")
+    print(f"  estimate: water {water_v / 1e6:.2f} M verts at {water_dx:g} m "
+          f"(~{water_v * 78 / 1e9:.2f} GB, ~{water_v / 50000:.0f} s), "
+          f"terrain {terrain_v / 1e6:.2f} M at {terrain_dx:g} m "
+          f"(~{terrain_v * 66 / 1e9:.2f} GB)")
+
+
 def _default_region(scene, posts: int = 900):
     """A shoreline window sized so the default spacing stays affordable.
 
@@ -423,6 +441,20 @@ def main() -> int:
                     help="bound the mesh to a region; spacing enters "
                          "quadratically, so the whole domain at a fine spacing "
                          "is usually far too much geometry")
+    ap.add_argument("--mesh-full", action="store_true",
+                    help="mesh the entire domain instead of a shoreline window "
+                         "-- for renders where the camera position is not known "
+                         "in advance. Check the printed estimate first.")
+    ap.add_argument("--terrain-ply", type=str, default=None, metavar="PATH",
+                    help="use this bed mesh instead of building one -- e.g. a "
+                         "PLY exported straight out of Houdini. It must agree "
+                         "with the .npy fields; check it with "
+                         "scripts/check_clearance.py")
+    ap.add_argument("--terrain-dx", type=float, default=None,
+                    help="terrain post spacing [m]; defaults to the water "
+                         "spacing. Coarsening it saves memory but lets the "
+                         "surface poke through the bed near the waterline -- "
+                         "measured at 0.029%% of vertices for 2x coarser")
     ap.add_argument("--mesh-obj", action="store_true",
                     help="also write an OBJ (geometry only -- no channels)")
     ap.add_argument("--mesh-t", type=float, default=0.0,
@@ -492,7 +524,29 @@ def main() -> int:
         from pywave import mesh as pw_mesh
 
         print("building the water mesh ...", flush=True)
-        region = tuple(args.mesh_region) if args.mesh_region else _default_region(scene)
+        if args.mesh_region:
+            region = tuple(args.mesh_region)
+        elif args.mesh_full:
+            region = tuple(scene.bathy.meta.extent[i] for i in (0, 2, 1, 3))
+        else:
+            region = _default_region(scene)
+
+        # Terrain matches the water spacing by default, and that is a
+        # correctness requirement rather than tidiness. Coarsening the bed is
+        # tempting -- it covers the whole region where water covers only the wet
+        # part, so it dominates a full-domain mesh, and past the bathymetry's own
+        # spacing the extra triangles carry no new information. But the two
+        # meshes then interpolate the same field differently: water samples
+        # depth bilinearly at its posts while a coarser terrain is linear over
+        # bigger triangles, and on a steep foreshore they diverge. Measured on
+        # the shipped export at water 0.5 m / terrain 1 m, 0.029% of water
+        # vertices ended up as much as 8.5 cm *below* the bed, all within 22 cm
+        # of the waterline. At matching spacing both are linear over the same
+        # triangles, so the depth limiter's guarantee carries through.
+        water_dx = args.mesh_dx if args.mesh_dx else cfg.output.mesh_dx
+        terrain_dx = args.terrain_dx if args.terrain_dx else water_dx
+
+        _report_mesh_size(scene, region, water_dx, terrain_dx)
         foam_field, _ = scene.foam_field()
         mesh_dir = out / "mesh"
 
@@ -510,29 +564,43 @@ def main() -> int:
               f"{region[2] - region[0]:.0f} x {region[3] - region[1]:.0f} m")
 
         # The bed, on the same grid and slightly larger, so the water has
-        # something to sit on and nothing shows through at the edges.
-        print("building the terrain mesh ...", flush=True)
-        tm = pw_mesh.build_terrain_mesh(scene.fine_bathy, cfg, dx=args.mesh_dx,
-                                        region=region, tileset=scene.tileset,
-                                        max_vertices=budget)
-        tstats = tm.validate()
-        written["terrain_ply"] = pw_export.write_ply(
-            tm, mesh_dir / "terrain_0000.ply")
-        written["terrain_json"] = pw_export.write_frame_metadata(
-            tm, mesh_dir / "terrain_0000.json")
-        if args.mesh_obj:
-            written["terrain_obj"] = pw_export.write_obj(
-                tm, mesh_dir / "terrain_0000.obj", quiet=True)
-        print(f"  terrain {tstats['n_vertices']:>9,} v {tstats['n_faces']:>9,} f")
+        # something to sit on and nothing shows through at the edges. Unless
+        # the bed is being supplied from outside -- a mesh authored in the DCC
+        # tool that built the terrain in the first place is better than one
+        # regridded from the fields, so long as it agrees with them.
+        if args.terrain_ply:
+            tm = None
+            terrain_ref = str(args.terrain_ply)
+            print(f"using the supplied terrain mesh: {terrain_ref}")
+            print("  the water's height limit comes from the .npy fields, so a "
+                  "bed finer than they are can show through. Verify with:")
+            print(f"  python scripts/check_clearance.py "
+                  f"{mesh_dir / 'water_0000.ply'} {terrain_ref}")
+        else:
+            terrain_ref = "terrain_0000.ply"
+            print("building the terrain mesh ...", flush=True)
+            tm = pw_mesh.build_terrain_mesh(scene.fine_bathy, cfg, dx=terrain_dx,
+                                            region=region, tileset=scene.tileset,
+                                            max_vertices=budget)
+            tstats = tm.validate()
+            written["terrain_ply"] = pw_export.write_ply(
+                tm, mesh_dir / "terrain_0000.ply")
+            written["terrain_json"] = pw_export.write_frame_metadata(
+                tm, mesh_dir / "terrain_0000.json")
+            if args.mesh_obj:
+                written["terrain_obj"] = pw_export.write_obj(
+                    tm, mesh_dir / "terrain_0000.obj", quiet=True)
+            print(f"  terrain {tstats['n_vertices']:>9,} v "
+                  f"{tstats['n_faces']:>9,} f")
 
         params = pw_export.mitsuba_scene_params(
-            "water_0000.ply", "terrain_0000.ply", water_mesh=wm, terrain_mesh=tm,
+            "water_0000.ply", terrain_ref, water_mesh=wm, terrain_mesh=tm,
             offshore=scene.offshore)
         written["scene_py"] = pw_export.write_mitsuba_scene(
-            mesh_dir / "scene.py", "water_0000.ply", "terrain_0000.ply",
+            mesh_dir / "scene.py", "water_0000.ply", terrain_ref,
             params=params)
         written["scene_xml"] = pw_export.write_mitsuba_xml(
-            mesh_dir / "scene.xml", "water_0000.ply", "terrain_0000.ply",
+            mesh_dir / "scene.xml", "water_0000.ply", terrain_ref,
             params=params)
 
         for kind, path in written.items():
