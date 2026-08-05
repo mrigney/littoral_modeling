@@ -158,6 +158,40 @@ class Bathymetry:
 
     # -- construction --------------------------------------------------------
 
+    @staticmethod
+    def _resolve_source(source, config_path):
+        """Find an export directory named in a scene file.
+
+        Tried in order: as given (absolute, or relative to the working
+        directory), then relative to the config file itself, then relative to
+        the directory above it -- which is where a config in ``configs/`` means
+        when it says ``houdini_export``.
+
+        Falling back through several roots is friendlier than demanding one,
+        but only if a miss says where it looked; otherwise a typo surfaces as a
+        missing file at a path the user never typed.
+        """
+        candidate = Path(source)
+        if candidate.is_absolute():
+            return candidate
+
+        roots = [Path.cwd()]
+        if config_path is not None:
+            roots += [Path(config_path).resolve().parent,
+                      Path(config_path).resolve().parent.parent]
+
+        tried = []
+        for root in roots:
+            attempt = root / candidate
+            tried.append(attempt)
+            if (attempt / "grid_meta.json").exists():
+                return attempt
+
+        listing = "\n  ".join(str(t) for t in tried)
+        raise FileNotFoundError(
+            f"bathymetry.source = {source!r} does not name a terrain export. "
+            f"Looked for grid_meta.json in:\n  {listing}")
+
     @classmethod
     def from_export(cls, directory, *, validate: bool = True,
                     sdf_tol: float = 1.0) -> "Bathymetry":
@@ -318,11 +352,7 @@ class Bathymetry:
             # honest answer: the mesh samples bathymetry bilinearly and may be
             # finer than it, but no interpolation creates bathymetry that was
             # never measured.
-            source = Path(b.source)
-            if not source.is_absolute() and cfg.source_path is not None:
-                candidate = cfg.source_path.parent.parent / source
-                if candidate.exists():
-                    source = candidate
+            source = cls._resolve_source(b.source, cfg.source_path)
             loaded = cls.from_export(source)
 
             # The scene and the export both carry a water level, and they must

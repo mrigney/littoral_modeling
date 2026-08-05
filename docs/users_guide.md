@@ -344,10 +344,14 @@ output:                         # PHASE 6 — parsed and validated, not yet used
   disjoint, and together span exactly `[0, 1]`. A gap silently loses variance, so
   it is rejected at load.
 
-**`bathymetry`** — all optional; describes the synthetic basin Phase 5 runs
-against, and is replaced by the Houdini export when Phase 4 lands.
+**`bathymetry`** — all optional; describes either a loaded terrain export or
+the synthetic basin that stands in for one.
+- `source` — path to a Phase 4 export directory. **When set, every other key
+  here is ignored** — the export carries its own grid, extent, water level and
+  CRS. Resolved relative to the working directory, then to the config file, then
+  to the directory above it; a miss lists all three.
 - `profile` — `planar` (straight shoreline) or `embayment` (cosine bays and
-  headlands). Anything else raises.
+  headlands). Anything else raises. Synthetic only.
 - `shoreline` — Y coordinate of the waterline. Water lies *below* it in Y and
   land above, so a wind with a +Y component drives waves onto the beach.
 - `dean_a` / `grain_size` — the Dean scale parameter directly, or the median

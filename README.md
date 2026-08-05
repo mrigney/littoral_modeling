@@ -32,6 +32,9 @@ Point a scene at a Phase 4 export and everything downstream follows — no code
 changes, because the synthetic bathymetry was built to satisfy the same contract:
 
 ```yaml
+scene:
+  water_level: 100.0          # must equal grid_meta.json's z_w -- checked
+  epsg: 32616                 # likewise
 bathymetry:
   source: houdini_export      # the six §4.5 files; other keys then ignored
 ```

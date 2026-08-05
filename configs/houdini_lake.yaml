@@ -20,8 +20,12 @@
 
 scene:
   domain: [1024.0, 1024.0]      # m -- informational here; the export governs
-  water_level: 100.0            # m, must match grid_meta.json's z_w
-  epsg: 32616
+  water_level: 100.0            # m. MUST equal grid_meta.json's z_w, and is
+                                # checked on load: a mismatch builds both meshes
+                                # at this value while measuring every depth from
+                                # the export's, so they agree with each other
+                                # and sit at the wrong absolute height.
+  epsg: 32616                   # likewise must match the export
 
 wind:
   speed: 5.0                    # m/s at 10 m reference
