@@ -395,6 +395,15 @@ def _default_region(scene, posts: int = 900):
         x_lo, x_hi = sorted((cx + far, cx + near))
         y_lo, y_hi = cy - 0.5 * span, cy + 0.5 * span
 
+    # Clip offshore to the water body, not just to the domain. A window sized
+    # from `posts * mesh_dx` can be far larger than the lake it is meant to
+    # frame -- on a small basin in a big domain the default ran most of the way
+    # across dry land, which is legal, slow and useless.
+    wx0, wy0, wx1, wy1 = scene.water_extent
+    pad = 0.15 * span
+    x_lo, x_hi = max(x_lo, wx0 - pad), min(x_hi, wx1 + pad)
+    y_lo, y_hi = max(y_lo, wy0 - pad), min(y_hi, wy1 + pad)
+
     return (max(x_lo, x0b), max(y_lo, y0b), min(x_hi, x1b), min(y_hi, y1b))
 
 

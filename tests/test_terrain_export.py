@@ -286,3 +286,93 @@ def test_surf_zone_is_sub_cell_on_the_real_export(record, cfg):
                 f"{bathy.meta.dx * slope / d_break:.1f}x the breaking depth. "
                 f"Resolving it would need finer bathymetry near the shore.")
     assert surf_width > 0.0
+
+
+# ---------------------------------------------------------------------------
+# Scene-level consistency
+# ---------------------------------------------------------------------------
+
+
+def test_water_level_mismatch_is_refused(record, tmp_path, cfg):
+    """`scene.water_level` and the export's `z_w` must agree.
+
+    If they do not, every mesh is built at the config's value while every depth
+    is measured from the export's. Water and terrain then stay consistent *with
+    each other* and both sit at the wrong absolute height -- which looks perfect
+    in isolation and is metres out against anything else in the world. Measured
+    at a deliberate 50 m mismatch: both meshes shifted by exactly 50 m.
+    """
+    from dataclasses import replace
+
+    bathy = Bathymetry.dean_beach(nx=64, ny=64, dx=4.0, shoreline_y=200.0,
+                                  water_level=100.0)
+    export.write_terrain_export(bathy, tmp_path / "e")
+
+    from pywave.config import BathymetryConfig
+
+    good = replace(cfg, scene=replace(cfg.scene, water_level=100.0, epsg=32616),
+                   bathymetry=BathymetryConfig(source=str(tmp_path / "e")))
+    Bathymetry.from_config(good)          # agrees: fine
+
+    bad = replace(good, scene=replace(good.scene, water_level=50.0))
+    with pytest.raises(ValueError, match="scene.water_level"):
+        Bathymetry.from_config(bad)
+
+    bad_crs = replace(good, scene=replace(good.scene, epsg=4326))
+    with pytest.raises(ValueError, match="epsg"):
+        Bathymetry.from_config(bad_crs)
+
+    record("4", "water level / CRS agreement between scene and export",
+           "enforced", "enforced",
+           note="A silent mismatch is self-consistent between the two meshes "
+                "and wrong against the rest of the world, so it is refused "
+                "rather than warned about.")
+
+
+def test_terrain_with_no_shoreline_is_refused(tmp_path, cfg):
+    """An all-water or all-land export fails with an explanation.
+
+    Every window, transect and camera is positioned relative to a waterline. An
+    export with none is almost always a mistake in the terrain, and returning
+    some arbitrary corner -- which is what an unguarded search does -- produces
+    a mesh that is not wrong so much as meaningless.
+    """
+    import sys
+
+    sys.path.insert(0, str(REPO / "scripts"))
+    import make_figures as mf
+
+    from dataclasses import replace
+
+    from pywave.config import BathymetryConfig
+
+    n, dx, zw = 48, 4.0, 100.0
+    depth = np.full((n, n), 5.0)                      # wet everywhere
+    sdf = np.full((n, n), -20.0)
+    normal = np.zeros((2, n, n))
+    normal[1] = 1.0
+    directory = tmp_path / "allwater"
+    directory.mkdir()
+    for name, arr in (("terrain_z", zw - depth), ("depth", depth), ("sdf", sdf)):
+        np.save(directory / f"{name}.npy", arr.astype(np.float32))
+    np.save(directory / "shore_normal.npy", normal.astype(np.float32))
+    (directory / "grid_meta.json").write_text(json.dumps(
+        {"x0": 0.0, "y0": 0.0, "dx": dx, "dy": dx, "nx": n, "ny": n,
+         "z_w": zw, "epsg": 32616}), encoding="utf-8")
+
+    # Two layers catch it, and the loader gets there first: with no waterline
+    # there is no inland direction, so the shore-normal check cannot pass.
+    with pytest.raises(AssertionError, match="shore_normal"):
+        Bathymetry.from_export(directory)
+
+    # And if validation is skipped, the shoreline search says so plainly rather
+    # than returning some arbitrary corner.
+    bathy = Bathymetry.from_export(directory, validate=False)
+    assert (bathy.depth > 0).all()
+
+    scene_cfg = replace(cfg, scene=replace(cfg.scene, water_level=zw, epsg=32616),
+                        bathymetry=BathymetryConfig(source=str(directory)))
+    scene = mf.Scene(scene_cfg)
+    scene._cache["bathy"] = bathy          # bypass the loader's own refusal
+    with pytest.raises(ValueError, match="no shoreline"):
+        _ = scene.shore_ref

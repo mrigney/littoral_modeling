@@ -323,7 +323,29 @@ class Bathymetry:
                 candidate = cfg.source_path.parent.parent / source
                 if candidate.exists():
                     source = candidate
-            return cls.from_export(source)
+            loaded = cls.from_export(source)
+
+            # The scene and the export both carry a water level, and they must
+            # agree. If they do not, every mesh is built at the config's value
+            # while every depth is measured from the export's, so the water and
+            # terrain stay consistent *with each other* and both sit at the
+            # wrong absolute height -- which looks perfect in isolation and is
+            # metres out against anything else in the world.
+            delta = abs(cfg.scene.water_level - loaded.meta.water_level)
+            if delta > 1e-6:
+                raise ValueError(
+                    f"scene.water_level is {cfg.scene.water_level} but "
+                    f"{source}/grid_meta.json says z_w = "
+                    f"{loaded.meta.water_level} ({delta:g} m apart). Both meshes "
+                    f"would be built at the config's value and every depth "
+                    f"measured from the export's, putting the whole scene "
+                    f"{delta:g} m off in world Z while looking self-consistent. "
+                    f"Set scene.water_level to match the export.")
+            if cfg.scene.epsg != loaded.meta.epsg:
+                raise ValueError(
+                    f"scene.epsg is {cfg.scene.epsg} but the export says "
+                    f"{loaded.meta.epsg}; they must describe the same CRS.")
+            return loaded
 
         width, height = cfg.scene.domain
 

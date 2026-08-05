@@ -152,8 +152,15 @@ class Scene:
             xa, ya = b.meta.axes()
             X, Y = np.meshgrid(xa, ya, indexing="xy")
             shore = np.abs(b.sdf) < 1.5 * b.meta.dx
-            if not shore.any():
-                raise ValueError("no shoreline in the bathymetry")
+            wet = b.depth > 0.0
+            if not shore.any() or not wet.any() or wet.all():
+                raise ValueError(
+                    f"this bathymetry has no shoreline: "
+                    f"{100 * wet.mean():.1f}% of it is wet. Every window, "
+                    f"transect and camera in the toolchain is positioned "
+                    f"relative to a waterline, so there is nothing sensible to "
+                    f"return. An all-water or all-land export is almost always "
+                    f"a mistake in the terrain, not a scene worth rendering.")
             # Take the top decile of latitude, then the cell nearest that
             # group's median X. Note the last step: medians of X and Y taken
             # *independently* give a point that need not lie on the contour at
@@ -165,6 +172,21 @@ class Scene:
             return float(xs[k]), float(ys[k])
 
         return self._memo("shore_ref", make)
+
+    @property
+    def water_extent(self):
+        """``(x0, y0, x1, y1)`` bounding box of the wet cells [m]."""
+        def make():
+            b = self.bathy
+            xa, ya = b.meta.axes()
+            X, Y = np.meshgrid(xa, ya, indexing="xy")
+            wet = b.depth > 0.0
+            if not wet.any():
+                return b.meta.extent
+            return (float(X[wet].min()), float(Y[wet].min()),
+                    float(X[wet].max()), float(Y[wet].max()))
+
+        return self._memo("water_extent", make)
 
     @property
     def offshore(self):

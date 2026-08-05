@@ -4,12 +4,12 @@
 
 | | |
 |---|---|
-| generated | 2026-08-05 00:57:31 UTC |
-| git_sha | `a7c3704bfd1578c02db47544bdd18ad33cae68f3 (working tree dirty)` |
+| generated | 2026-08-05 01:36:26 UTC |
+| git_sha | `5c0a14d0ad07154cf3fbf49876e2c870a3cd1fe8 (working tree dirty)` |
 | scene | `configs/test_lake.yaml` |
 | python | 3.14.5 (Windows AMD64) |
 | numpy / scipy | 2.5.1 / 1.18.0 |
-| checks recorded | 127 |
+| checks recorded | 128 |
 | exit status | PASS |
 
 Every number below was measured by the test suite against the implementation in this commit. Tolerances are the gate criteria from `littoral-water-implementation-cookbook.md`, except where a deviation is recorded in [Gate deviations](#gate-deviations).
@@ -143,6 +143,7 @@ Notes:
 | real export foreshore slope | 0.31464 | -- | -- | -- | PASS |
 | Iribarren number on the real terrain | 1.4067 | -- | -- | -- | PASS |
 | surf zone width on the real terrain | 0.347622 m | -- | -- | -- | PASS |
+| water level / CRS agreement between scene and export | enforced | enforced | -- | -- | PASS |
 
 Notes:
 
@@ -152,6 +153,7 @@ Notes:
 - **real export foreshore slope** -- Measured from the bed, not assumed. The synthetic test lake is 0.067 and the cookbook assumes ~0.05, so this shore is far steeper and lands in a different breaker regime.
 - **Iribarren number on the real terrain** -- Breaker type: plunging. The synthetic lake gives 0.33 (spilling) on a 6.7% foreshore; this shore is 31% and lands in a different regime.
 - **surf zone width on the real terrain** -- = breaking depth 0.109 m / foreshore slope 0.315. At the export's 1 m posts that is 0.35 cells, so one cell spans 2.9x the breaking depth. Resolving it would need finer bathymetry near the shore.
+- **water level / CRS agreement between scene and export** -- A silent mismatch is self-consistent between the two meshes and wrong against the rest of the world, so it is refused rather than warned about.
 
 ## Gate 5 -- nearshore transformation
 
