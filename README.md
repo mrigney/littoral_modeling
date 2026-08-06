@@ -300,6 +300,7 @@ scripts/
   make_figures.py    the eight figures + a markdown gallery
   make_overview.py   one self-contained shareable HTML page
   check_clearance.py does the water stay above a given bed mesh?
+  collect_run_info.py harvests runs/ into one markdown table
 configs/
   test_lake.yaml     reference scene: 5 m/s wind, 1 km fetch, straight beach
   coastal_bay.yaml   contrasting scene: 12 m/s, 40 km fetch, embayed shore
