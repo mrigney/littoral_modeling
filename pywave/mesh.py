@@ -203,6 +203,7 @@ def build_water_mesh(
     trim_depth: float = 0.02,
     margin: float | None = None,
     refraction: str = "snell",
+    band_limit: bool = True,
     foam: np.ndarray | None = None,
     foam_bathy: Bathymetry | None = None,
     max_vertices: int = DEFAULT_MAX_VERTICES,
@@ -218,6 +219,10 @@ def build_water_mesh(
     trim_depth : cut the mesh at this depth rather than at zero [m].
     margin : landward dilation past the waterline [m]. Defaults to the swash
         excursion, so the swash band has geometry to live on.
+    band_limit : drop spectral content above the mesh Nyquist ``pi/dx`` before
+        sampling, so it cannot alias into the geometry. On by default; that
+        variance reaches the renderer through the ``mss`` channel instead.
+        Turn it off only to reproduce the old behaviour for comparison.
     foam : optional foam coverage on ``foam_bathy``'s grid, sampled onto the
         vertices. Omitted rather than faked when absent.
 
@@ -274,7 +279,16 @@ def build_water_mesh(
     idx, faces = triangulate_mask(mask)
     vx, vy = X[mask], Y[mask]
 
-    nf = nearshore.transform(tileset, bathy, cfg, vx, vy, t, refraction=refraction)
+    # Remove what this spacing cannot represent BEFORE sampling it. Sampling
+    # the full tileset at coarse posts does not discard the short waves, it
+    # folds them onto long ones -- see TileSet.band_limited. The variance is not
+    # lost: `vertex_channels` hands exactly that part to the BSDF as `mss`,
+    # which is what the LOD invariant says should happen. Skipping this step
+    # puts it in both places at once.
+    surf_tiles = tileset.band_limited(np.pi / dx) if band_limit else tileset
+
+    nf = nearshore.transform(surf_tiles, bathy, cfg, vx, vy, t,
+                             refraction=refraction)
     s = nf.surface
     chop = cfg.surface.choppiness
 

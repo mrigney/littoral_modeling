@@ -721,3 +721,126 @@ def test_read_ply_any_round_trips_our_own_output(record, cfg, tmp_path):
            note=f"{len(strict)} channels, {len(sf)} faces", passed=worst == 0.0)
     assert worst == 0.0
     assert np.array_equal(sf, lf)
+
+
+
+# ---------------------------------------------------------------------------
+# Band limiting: the mesh must not carry what its spacing cannot represent
+# ---------------------------------------------------------------------------
+
+
+def _deep_window(bathy, side=200.0):
+    """A square of the deepest water available, for statistics free of the
+    nearshore transform's amplitude modulation."""
+    d = bathy.depth
+    ys, xs = np.nonzero(d >= 0.9 * d.max())
+    ax, ay = bathy.meta.axes()
+    cx, cy = float(ax[int(np.median(xs))]), float(ay[int(np.median(ys))])
+    h = 0.5 * side
+    return (cx - h, cy - h, cx + h, cy + h)
+
+
+def test_band_limited_drops_everything_above_the_cut(record, cfg):
+    """`TileSet.band_limited(k)` must actually stop at k, and lose energy."""
+    from pywave import tiling
+
+    ts = tiling.TileSet.build(cfg)
+    prev = ts.m0()
+    rows = []
+    for dx in (0.25, 0.5, 1.0, 2.0, 4.0):
+        k_cut = np.pi / dx
+        lim = ts.band_limited(k_cut)
+        assert lim.k_max <= k_cut * (1 + 1e-9), "band survives above the cut"
+        assert lim.m0() <= prev + 1e-15, "coarser cut kept more energy"
+        prev = lim.m0()
+        rows.append(f"dx {dx}: {len(lim.tiles)} tiles, k_max "
+                    f"{lim.k_max:.2f}, Hs {lim.hs():.4f}")
+
+    record("6", "band_limited monotonically removes energy", prev,
+           unit="m^2", note="; ".join(rows), passed=True)
+    assert ts.band_limited(1e9) is ts, "a cut above k_max should be a no-op"
+
+
+@pytest.mark.parametrize("dx", [0.125, 0.25, 0.5])
+def test_mesh_variance_matches_the_band_limited_spectrum(record, cfg, dx):
+    """The meshed surface must carry the resolved variance and no more.
+
+    Sampling the full tileset at coarse posts does not discard the short waves,
+    it folds them onto long ones -- so the mesh ends up with roughly the *full*
+    variance, at the wrong wavelengths, while `submesh_mss` hands that same
+    energy to the BSDF as well. Counted twice, and in the wrong place.
+
+    Measured on the straits scene (lambda_p 8.5 m, synthesised to lambda 0.18 m)
+    before the fix: elevation power above lambda 6.3 m was +6.4% at 2 m posts
+    and +88.5% at 4 m. This pins the fix at the shipped scene's scale.
+    """
+    from pywave import tiling
+
+    ts = tiling.TileSet.build(cfg)
+    bathy = Bathymetry.from_config(cfg, fine=True)
+    region = _deep_window(bathy, side=200.0)
+
+    m = mesh.build_water_mesh(ts, bathy, cfg, t=0.0, dx=dx, region=region)
+    old = mesh.build_water_mesh(ts, bathy, cfg, t=0.0, dx=dx, region=region,
+                                band_limit=False)
+
+    want = ts.band_limited(np.pi / dx).m0()
+    got = float(np.var(m.vertices[:, 2]))
+    got_old = float(np.var(old.vertices[:, 2]))
+    err = abs(got - want) / want
+    excess = got_old / got - 1.0
+
+    record("6", f"meshed variance vs band-limited m0, dx={dx} m", err,
+           tol=0.15, unit="",
+           note=f"{m.n_vertices:,} vertices. band-limited m0 {want:.4e}, "
+                f"mesh {got:.4e}. Without the cut the mesh carries "
+                f"{100 * excess:+.1f}% more, which is folded energy, not sea.",
+           passed=err < 0.15)
+    assert err < 0.15, f"mesh variance {got:.4e} != band-limited m0 {want:.4e}"
+
+    # The channel was always right and must not have moved.
+    assert np.array_equal(old.channels["mss"], m.channels["mss"])
+
+    # The cut must actually bite once the spacing stops resolving the spectrum,
+    # otherwise the fix is inert. On this scene 0.5 m posts already retain only
+    # 78% of the variance, so there is something real to remove.
+    retained = want / ts.m0()
+    if retained < 0.9:
+        assert excess > 0.02, "band limiting changed nothing at a coarse spacing"
+
+
+def test_band_limiting_low_passes_rather_than_reseeds(record, cfg):
+    """Truncating must keep the realisation, not draw a new one.
+
+    Seeds are spawned for every configured tile before any are dropped, so the
+    survivors keep their own streams. If that regresses, a coarse mesh silently
+    becomes a *different* sea and comparing two resolutions means nothing.
+    """
+    from pywave import tiling
+
+    ts = tiling.TileSet.build(cfg)
+    lim = ts.band_limited(np.pi / 0.5)
+
+    x = np.linspace(0.0, 200.0, 400)
+    X, Y = np.meshgrid(x, x, indexing="xy")
+    h_full = ts.sample(X, Y, 0.0).h
+    h_lim = lim.sample(X, Y, 0.0).h
+
+    # A low-pass keeps a component of the original, and what it removes is
+    # orthogonal to what it keeps. So the correlation is not merely "high" --
+    # it is pinned at sigma_limited / sigma_full. An independent draw of the
+    # same spectrum would give zero however much variance it happened to carry,
+    # which is exactly the regression this is here to catch.
+    r = float(np.corrcoef(h_full.ravel(), h_lim.ravel())[0, 1])
+    expected = float(h_lim.std() / h_full.std())
+    err = abs(r - expected)
+
+    record("6", "correlation, full vs band-limited surface", r,
+           reference=expected, tol=0.02,
+           note=f"Same seeds, so the cut is a low-pass of the same sea, not an "
+                f"independent draw. Orthogonality pins r at sigma_lim/sigma_full "
+                f"= {expected:.4f}; a reseed would give ~0.",
+           passed=err < 0.02)
+    assert err < 0.02, f"r={r:.4f} but sigma ratio is {expected:.4f}"
+    assert r > 0.5, "the cut removed so much that this proves little"
+    assert lim.m0() < ts.m0()

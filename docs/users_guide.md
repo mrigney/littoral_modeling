@@ -404,6 +404,57 @@ The bed dominates, because water covers only the wet fifth while terrain covers
 all of it. That makes coarsening the bed with `--terrain-dx` very tempting.
 **Don't** — read the next section first.
 
+### Choosing `mesh_dx` for your sea state
+
+The one number that matters is **posts per peak wavelength**, `λp / mesh_dx`.
+`λp` is in `summary.md`; it grows fast with wind and fetch, so a spacing tuned
+for one scene will not carry over to another.
+
+| `λp / mesh_dx` | What you get |
+|---|---|
+| ≳ 16 | Waves look like waves |
+| ~8 | Acceptable; faceting starts to show up close |
+| ~4 | Visibly patterned |
+| ≲ 2 | Regular moiré, no natural structure left |
+
+The mesh is band-limited to its own Nyquist, so a coarse mesh **loses** short
+waves rather than aliasing them — they go to the BSDF as `mss` instead. That
+keeps the geometry honest, but it cannot invent detail: at 4 posts per peak wave
+there is very little sea left in the geometry, and the render will show it.
+
+Two scenes for scale:
+
+| | `houdini_lake` | `straits` |
+|---|---|---|
+| Wind / fetch | 5 m/s, 1 km | 8 m/s, 7 km |
+| `λp` | 1.72 m | **8.48 m** |
+| `mesh_dx` used | 0.25 m | 2–4 m |
+| Posts per `λp` | 6.9 | **4.2 / 2.1** |
+| Result | good | patterned |
+
+If a fine enough mesh is unaffordable over the area you need, that is the
+problem LOD rings solve, and they are not built yet ([Roadmap](#14-roadmap)).
+Until then, bound the region rather than coarsening the whole domain.
+
+### Why distant water looks patterned
+
+Separate from the above, and not a model problem. Your renderer samples the mesh
+with pixels, and a pixel's footprint grows with range. Beyond the range where the
+projected wavelength falls below about two pixels you get moiré — which appears
+as a **line across the image at constant range**, not a place in the world.
+
+```
+patterning beyond   d ≈ (λp / 2) · W / FOV        [FOV in radians]
+```
+
+For `λp` = 8.5 m at 1280 px and 45°, that is 6.9 km; at 1920 px or a 30° FOV it
+doubles. To tell it apart from a real seam in the data, **orbit the camera**: a
+sampling artefact stays at the same distance from you and sweeps across the water,
+while something in the geometry stays on the same patch of sea.
+
+Higher resolution, narrower FOV and more samples per pixel all push it back. A
+proper fix needs LOD rings plus a `mss` that varies by ring.
+
 ### Keeping the water above the bed
 
 Every clearance guarantee inside `pywave` is between the water surface and the
@@ -792,6 +843,9 @@ frequency moment. See [algorithms.md §2](algorithms.md#2-conventions).
 | `exceeds max_vertices` | Coarsen `--mesh-dx`, shrink `--mesh-region`, or raise the guard |
 | `no wet cells in region` | The region misses the water; check it against `summary.md`'s extents |
 | Mesh is a thin strip | The default region is a shoreline window — pass `--mesh-region` or `--mesh-full` |
+| Water looks patterned everywhere | `mesh_dx` too coarse for `λp` — check posts per peak wave in §6 |
+| Water looks patterned beyond a line | Pixel footprint, not the model. Orbit the camera to confirm; see §6 |
+| Shorebreak too glassy | You are on constant `alpha`; read the `mss` channel, which rises ~20–30% in the last half-metre |
 | Bed pokes through the water at the shore | Fields coarser than the bed mesh; see §6 and run `check_clearance.py` |
 | Bed pokes through in deep water | Not a resolution problem — the meshes disagree on `water_level` or CRS |
 | `lie outside the bed mesh` | The bed does not cover the water; it must be at least as large |

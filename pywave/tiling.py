@@ -185,12 +185,17 @@ class TileSet:
     """A set of band-limited tiles that sum to the full-band surface."""
 
     tiles: tuple[WaveTile, ...]
+    #: Kept so :meth:`band_limited` can rebuild with the same seeds. Optional
+    #: only so that ``TileSet(tiles)`` still works for hand-assembled sets.
+    cfg: "Config | None" = None
+    depth: float | None = None
 
     @classmethod
     def build(
         cls,
         cfg: Config,
         depth: float | None = None,
+        k_cut: float | None = None,
     ) -> "TileSet":
         """Build the tile set described by a :class:`~pywave.config.Config`.
 
@@ -199,12 +204,23 @@ class TileSet:
         each tile an independent, reproducible stream -- reusing the same
         integer for every tile would correlate the tiles' phases and produce a
         surface whose bands are locked together.
+
+        ``k_cut`` truncates every band at that wavenumber, dropping tiles that
+        lie entirely above it.  Seeds are spawned for *all* configured tiles
+        before any are dropped, so a truncated set is the same realisation of
+        the same sea with its short waves removed -- not a different sea.  See
+        :meth:`band_limited` for why anything would want that.
         """
         edges = band_edges(cfg.surface.tiles)
         rotations = tile_rotations(len(cfg.surface.tiles))
         children = np.random.SeedSequence(cfg.spectrum.seed).spawn(
             len(cfg.surface.tiles)
         )
+
+        if k_cut is not None:
+            if not np.isfinite(k_cut) or k_cut <= 0.0:
+                raise ValueError(f"k_cut must be positive and finite, got {k_cut}")
+            edges = tuple((lo, min(hi, float(k_cut))) for lo, hi in edges)
 
         tiles = tuple(
             WaveTile.build(
@@ -223,8 +239,46 @@ class TileSet:
             for tc, band, rot, child in zip(
                 cfg.surface.tiles, edges, rotations, children
             )
+            # An empty band carries nothing; keeping it would cost an FFT per
+            # frame to add zero. The lowest tile always survives, because its
+            # band starts at k = 0 and k_cut is positive.
+            if band[1] > band[0]
         )
-        return cls(tiles)
+        return cls(tiles, cfg=cfg, depth=depth)
+
+    def band_limited(self, k_cut: float) -> "TileSet":
+        """This same sea with everything above ``k_cut`` removed.
+
+        A mesh of spacing ``dx`` cannot represent waves shorter than ``2*dx``.
+        Sampling them anyway does not discard them -- it *folds* them down onto
+        long wavelengths, where they appear as swell that is not there. The
+        remedy for aliasing is always the same: remove what cannot be
+        represented **before** sampling, not after.
+
+        Nothing is lost physically. That variance is already accounted for: it
+        is exactly what :func:`pywave.channels.submesh_mss` hands to the BSDF as
+        sub-facet roughness, which is the whole content of the LOD invariant
+
+            ``mss_resolved(dx) + mss_above(pi/dx) = mss_total``.
+
+        Without this, the mesh carries that energy *as well*, aliased, while the
+        BSDF is also told about it -- counted twice, and in the wrong place.
+        Measured on the straits scene (lambda_p 8.5 m, surface synthesised down
+        to lambda 0.18 m), the elevation power at lambda > 6.3 m came out
+        +6.4% at 2 m posts and +88.5% at 4 m posts; at 0.25 m it is -0.00%,
+        which is why fine-meshed scenes never showed it.
+        """
+        if self.cfg is None:
+            raise ValueError(
+                "this TileSet was assembled directly rather than built from a "
+                "config, so it cannot be rebuilt; use TileSet.build(cfg, "
+                "k_cut=...) instead"
+            )
+        if not np.isfinite(k_cut) or k_cut <= 0.0:
+            raise ValueError(f"k_cut must be positive and finite, got {k_cut}")
+        if k_cut >= self.k_max:
+            return self          # already inside the cut; nothing to remove
+        return TileSet.build(self.cfg, depth=self.depth, k_cut=float(k_cut))
 
     # -- aggregate spectral properties --------------------------------------
 

@@ -4,12 +4,12 @@
 
 | | |
 |---|---|
-| generated | 2026-08-05 12:00:07 UTC |
-| git_sha | `3fd7579d60a8729cf9604859afcf171abe176bc8 (working tree dirty)` |
+| generated | 2026-08-06 06:44:11 UTC |
+| git_sha | `3500695daaf6b6d63c612c59be7a7a9b6a198eda (working tree dirty)` |
 | scene | `configs/test_lake.yaml` |
 | python | 3.14.5 (Windows AMD64) |
 | numpy / scipy | 2.5.1 / 1.18.0 |
-| checks recorded | 133 |
+| checks recorded | 138 |
 | exit status | PASS |
 
 Every number below was measured by the test suite against the implementation in this commit. Tolerances are the gate criteria from `littoral-water-implementation-cookbook.md`, except where a deviation is recorded in [Gate deviations](#gate-deviations).
@@ -195,10 +195,10 @@ Notes:
 | cold vs sequential, worst per-cell relative error | 0.006144 | 0 | -- | 1.0e-02 | PASS |
 | spin-up steps for 0.5% residual at 30 fps | 688 | -- | -- | -- | PASS |
 | depth from the coarse vs refined grid, 5 m offshore | 3.0543e-04 m | 0 m | -- | 5.0e-02 | PASS |
-| shipped configs that load and build | 3 | -- | -- | -- | PASS |
+| shipped configs that load and build | 4 | -- | -- | -- | PASS |
 | cropped vs parent bathymetry, worst sampling difference | 0 | 0 | -- | 1.0e-12 | PASS |
 | foam equilibrium across half lives 1-30 s (worst deviation) | 0 | 0 | -- | 1.0e-09 | PASS |
-| shipped configs, foam equilibrium | 3 | -- | -- | -- | PASS |
+| shipped configs, foam equilibrium | 4 | -- | -- | -- | PASS |
 | wet samples with zero wave height, winds all round | 0 | 0 | -- | 0.0e+00 | PASS |
 
 Notes:
@@ -232,10 +232,10 @@ Notes:
 - **cold vs sequential, worst per-cell relative error** -- Spin-up 92 steps = 23.0 s, initial-condition residual 0.0049. As a fraction of peak coverage the error is 0.121%. The cookbook's suggested 30 frames would leave 79% of the initial condition intact -- the window is set by the half life, not by a frame count.
 - **spin-up steps for 0.5% residual at 30 fps** -- = 22.9 s of simulated time. At the 0.25 s foam step the same window is 92 steps, which is why foam does not sub-step at the frame rate.
 - **depth from the coarse vs refined grid, 5 m offshore** -- Grids are 1 m and 0.25 m; they describe one beach, so a sample must not depend on which is used.
-- **shipped configs that load and build** -- coastal_bay: Hs 1.432 m, Tp 4.75 s; houdini_lake: Hs 0.085 m, Tp 1.05 s; test_lake: Hs 0.085 m, Tp 1.05 s.
+- **shipped configs that load and build** -- coastal_bay: Hs 1.432 m, Tp 4.75 s; houdini_lake: Hs 0.085 m, Tp 1.05 s; straits: Hs 0.382 m, Tp 2.33 s; test_lake: Hs 0.085 m, Tp 1.05 s.
 - **cropped vs parent bathymetry, worst sampling difference** -- Parent (200, 4000), crop (81, 1001). The crop carries its own origin, so world coordinates are unchanged.
 - **foam equilibrium across half lives 1-30 s (worst deviation)** -- Target 0.85. 1s: 0.850, 3s: 0.850, 6s: 0.850, 12s: 0.850, 30s: 0.850. The rate is derived from the target and the half life, so the coverage a breaking cell reaches no longer depends on how long foam survives.
-- **shipped configs, foam equilibrium** -- coastal_bay: t_half 6s -> 0.850; houdini_lake: t_half 3s -> 0.850; test_lake: t_half 3s -> 0.850. All below the clip ceiling.
+- **shipped configs, foam equilibrium** -- coastal_bay: t_half 6s -> 0.850; houdini_lake: t_half 3s -> 0.850; straits: t_half 3s -> 0.850; test_lake: t_half 3s -> 0.850. All below the clip ceiling.
 - **wet samples with zero wave height, winds all round** -- Four wind directions including two blowing offshore. Any non-zero fraction here means Kr is deleting the sea somewhere.
 
 ## Gate 6 -- mesh generation and export
@@ -244,11 +244,11 @@ Notes:
 |---|---|---|---|---|---|
 | mesh vertices | 19762 | -- | -- | -- | PASS |
 | max |‖normal‖ - 1| | 5.9605e-08 | 0 | -- | 1.0e-05 | PASS |
-| min normal z component | 0.894587 | -- | -- | -- | PASS |
+| min normal z component | 0.937343 | -- | -- | -- | PASS |
 | wet posts not meshed | 0 | 0 | -- | 0.0e+00 | PASS |
 | furthest inland meshed post (sdf) | 0.25 m | -- | -- | -- | PASS |
 | smallest terrain-minus-mesh clearance onshore | 0.019997 m | -- | -- | -- | PASS |
-| analytic vs face normal angle, mean | 4.2577 deg | -- | -- | -- | PASS |
+| analytic vs face normal angle, mean | 2.425 deg | -- | -- | -- | PASS |
 | LOD invariant at the mesh spacing | 0.046111 | 0.046111 | 3.61e-07 | 1.0e-02 | PASS |
 | lookup vs direct quadrature for sub-mesh mss | 4.7215e-04 | 0 | -- | 2.0e-02 | PASS |
 | sub-mesh mss at 3 cm depth vs deep water | 0.441373 | -- | -- | -- | PASS |
@@ -259,16 +259,21 @@ Notes:
 | max difference between two builds of the same frame | 0 | 0 | -- | 0.0e+00 | PASS |
 | terrain vertices | 24153 | -- | -- | -- | PASS |
 | terrain min normal z | 0.993225 | -- | -- | -- | PASS |
-| terrain overhang beyond the water mesh | 0.956238 m | -- | -- | -- | PASS |
-| min clearance between water surface and bed | 0.002785 m | -- | -- | -- | PASS |
+| terrain overhang beyond the water mesh | 0.962341 m | -- | -- | -- | PASS |
+| min clearance between water surface and bed | 0.002769 m | -- | -- | -- | PASS |
 | bed slope, median | 1.8359 deg | -- | -- | -- | PASS |
 | Mitsuba scene Beckmann alpha | 0.1983 | 0.1983 | 0.00e+00 | 1.0e-04 | PASS |
 | Mitsuba XML scene parses | yes | yes | -- | -- | PASS |
-| water clearance above the terrain mesh | 0.003487 m | -- | -- | -- | PASS |
+| water clearance above the terrain mesh | 0.003906 m | -- | -- | -- | PASS |
 | read_ply_any: ascii | 0 m | -- | -- | -- | PASS |
 | read_ply_any: big-endian, mixed double/float | 0 m | -- | -- | -- | PASS |
 | read_ply_any: quad, fan-triangulated | 0 m | -- | -- | -- | PASS |
 | read_ply_any vs read_ply on our own PLY | 0 | -- | -- | -- | PASS |
+| band_limited monotonically removes energy | 1.3120e-16 m^2 | -- | -- | -- | PASS |
+| meshed variance vs band-limited m0, dx=0.125 m | 0.049655 | -- | -- | 1.5e-01 | PASS |
+| meshed variance vs band-limited m0, dx=0.25 m | 0.049775 | -- | -- | 1.5e-01 | PASS |
+| meshed variance vs band-limited m0, dx=0.5 m | 0.059381 | -- | -- | 1.5e-01 | PASS |
+| correlation, full vs band-limited surface | 0.880856 | 0.882082 | 1.39e-03 | 2.0e-02 | PASS |
 
 Notes:
 
@@ -277,7 +282,7 @@ Notes:
 - **wet posts not meshed** -- A gap here shows up as a hole at the waterline.
 - **furthest inland meshed post (sdf)** -- Swash margin is 0.38 m; the mesh is dilated landward by that much so the swash band has geometry to live on.
 - **smallest terrain-minus-mesh clearance onshore** -- 241 vertices sit landward of the waterline. Positive means the bed is above the water mesh, so the water is hidden rather than fighting for the same pixels.
-- **analytic vs face normal angle, mean** -- p95 8.6 deg, max 16.4 deg. At 0.25 m posts the mesh barely resolves the finest spectral band, so a few degrees of disagreement is the expected cost of differencing rather than a defect.
+- **analytic vs face normal angle, mean** -- p95 5.0 deg, max 11.9 deg. At 0.25 m posts the mesh barely resolves the finest spectral band, so a few degrees of disagreement is the expected cost of differencing rather than a defect.
 - **LOD invariant at the mesh spacing** -- Mesh carries 25% of the slope variance as geometry; the BSDF gets the remaining 75% as roughness (Beckmann alpha = 0.1866).
 - **lookup vs direct quadrature for sub-mesh mss** -- `mss_above` is a radial quadrature, far too slow per vertex, so it is interpolated over a log-spaced depth table. This bounds the interpolation error against calling it directly.
 - **sub-mesh mss at 3 cm depth vs deep water** -- kd = 0.75 there. Treating the sub-mesh share as a scene constant would understate the roughness handed to the BSDF by this much, in the one band anyone looks at.
@@ -297,6 +302,11 @@ Notes:
 - **read_ply_any: big-endian, mixed double/float** -- 2 triangles recovered
 - **read_ply_any: quad, fan-triangulated** -- 2 triangles recovered
 - **read_ply_any vs read_ply on our own PLY** -- 13 channels, 2400 faces
+- **band_limited monotonically removes energy** -- dx 0.25: 2 tiles, k_max 12.57, Hs 0.0828; dx 0.5: 1 tiles, k_max 6.28, Hs 0.0752; dx 1.0: 1 tiles, k_max 3.14, Hs 0.0325; dx 2.0: 1 tiles, k_max 1.57, Hs 0.0021; dx 4.0: 1 tiles, k_max 0.79, Hs 0.0000
+- **meshed variance vs band-limited m0, dx=0.125 m** -- 1,761,100 vertices. band-limited m0 4.5106e-04, mesh 4.2866e-04. Without the cut the mesh carries +0.7% more, which is folded energy, not sea.
+- **meshed variance vs band-limited m0, dx=0.25 m** -- 441,351 vertices. band-limited m0 4.2832e-04, mesh 4.0700e-04. Without the cut the mesh carries +5.8% more, which is folded energy, not sea.
+- **meshed variance vs band-limited m0, dx=0.5 m** -- 110,676 vertices. band-limited m0 3.5374e-04, mesh 3.3273e-04. Without the cut the mesh carries +28.9% more, which is folded energy, not sea.
+- **correlation, full vs band-limited surface** -- Same seeds, so the cut is a low-pass of the same sea, not an independent draw. Orthogonality pins r at sigma_lim/sigma_full = 0.8821; a reseed would give ~0.
 
 ## Gate deviations
 

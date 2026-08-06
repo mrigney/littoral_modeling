@@ -1106,6 +1106,74 @@ exists only as a sampled grid, with a shoreline from a distance transform rather
 than a closed form, so there is no analytic slope to prefer and a central
 difference is the honest answer.
 
+### Band limiting: the mesh carries only what its spacing can hold
+
+A mesh of spacing `dx` cannot represent waves shorter than `2·dx`. Sampling them
+anyway does not discard them — it **folds** them onto long wavelengths, where
+they appear as swell that is not in the sea.
+
+So the tile set is truncated at the mesh Nyquist *before* it is sampled:
+
+```
+surf_tiles = tileset.band_limited(π / dx)
+```
+
+`TileSet.band_limited` rebuilds the tiles with every band clipped to `k_cut`,
+dropping any tile that lies entirely above it. Seeds are spawned for all
+configured tiles *before* any are dropped, so the result is the same realisation
+of the same sea with its short waves removed — not a different sea. That is
+checked by correlating the two surfaces: orthogonality pins the correlation at
+`σ_limited / σ_full` rather than merely "high".
+
+Nothing is lost physically. The removed variance is exactly what
+`channels.submesh_mss` hands the BSDF as sub-facet roughness — the content of
+the LOD invariant in §16. Before this was in place the mesh carried that energy
+*as well*, aliased, while the BSDF was also told about it: counted twice, and in
+the wrong place.
+
+**Measured on the straits scene** (λp 8.5 m, surface synthesised down to
+λ 0.18 m), elevation power above λ 6.3 m against a correctly band-limited
+surface:
+
+| mesh_dx | Excess long-wave power | Elevation σ ratio |
+|---|---|---|
+| 0.25 m | −0.00% | ×1.001 |
+| 1 m | — | ×1.024 |
+| 2 m | +6.4% | ×1.100 |
+| 4 m | +88.5% | ×1.522 |
+
+Two things follow. Fine-meshed scenes never showed the defect, which is why it
+survived to Phase 6. And the visible symptom is not noise but a *regular*
+pattern, because folding maps a broad band of short waves onto a narrow band of
+long ones — coherent structure, of exactly the kind that then beats hardest
+against a renderer's pixel grid.
+
+The mesh's own `Hs` therefore falls with spacing, and should: on the straits
+scene the geometry carries 0.386 m at 0.25 m posts and 0.266 m at 4 m, with the
+difference living in `mss`.
+
+### A uniform mesh cannot explain a boundary
+
+Worth stating because it is easy to get backwards. Band limiting is a property
+of `dx`, which is constant across the mesh, so its error is the same everywhere.
+It cannot produce a seam or a line in a render.
+
+A render has a *second* sampling — pixels sampling the mesh — whose footprint
+grows with range. That one has a threshold: patterning begins where the
+projected wavelength falls below about two pixels, which is a locus at constant
+range, i.e. a line across the image. For a camera of width `W` and horizontal
+field of view `FOV`, that range is
+
+```
+d ≈ (λp / 2) · W / FOV        [FOV in radians]
+```
+
+— 6.9 km for 1280 px at 45°. Aliased geometry does not draw that line, but it
+moves it closer and makes it uglier, by handing the pixel grid coherent
+short-scale structure to beat against. The remedy for the far field is LOD rings
+(§6.2, not built) together with a `mss` that varies by ring; roughness is where
+the missing waves are meant to go.
+
 ### Where the clearance guarantee actually lives
 
 The depth limiter of §12 bounds the surface against the **depth field**. A
@@ -1146,6 +1214,8 @@ fields. `scripts/check_clearance.py` measures any such pair directly.
 | Water clearance above the **terrain mesh** | 0 below, of 857,930 | 0 below |
 | Analytic vs face normals | 4.3° mean | < 15° |
 | Rebuilt frame difference | 0 | 0 |
+| Meshed variance vs band-limited `m0` | within 15% | < 15% |
+| Band-limited surface still the same sea | `r` = σ ratio | ±0.02 |
 
 ---
 
