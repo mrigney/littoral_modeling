@@ -35,7 +35,7 @@ runs/
 #     git add -f houdini_export/
 houdini_export/
 *_export/
-# ... and exports that do not follow that naming. `straits/` is a Strait of
+# ... and exports that do not follow that naming. `straits*/` is a Strait of
 # Hormuz export; it was briefly half-committed because `*.npy` caught the
 # fields while grid_meta.json slipped through, which is the exact failure the
 # note above warns about. Name new exports `<something>_export/` and they are
