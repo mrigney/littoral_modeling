@@ -222,7 +222,26 @@ class NearshoreConfig:
     directly, because the two are tied together by the equilibrium and setting
     a rate independently saturates at some half lives and not others.
     """
-    refraction: bool = True
+    refraction: str = "snell"
+    """How refraction is applied: ``"snell"``, ``"blend"`` or ``"none"``.
+
+    ``"snell"`` turns the waves *and* scales their height by the ray-convergence
+    factor ``Kr``. ``"blend"`` turns them but leaves the height alone. ``"none"``
+    does neither.
+
+    The distinction matters on a complex coastline. ``Kr`` is derived for
+    straight parallel depth contours, and it is computed here from the direction
+    to the nearest shore -- which is discontinuous wherever a different piece of
+    coast becomes the nearest one (the medial axis of the water body). Measured
+    on a Strait of Hormuz export at 0.25 m, the p99.9 one-cell jump in wave
+    amplitude was 0.375 under ``"snell"`` against 0.013 under ``"blend"``: a
+    30x difference, visible as hard seams radiating from every shoreline
+    concavity. Until refraction is solved properly (see docs/algorithms.md),
+    ``"blend"`` is the safe choice for a real coast and ``"snell"`` is right for
+    a smooth synthetic one.
+
+    ``true``/``false`` are still accepted and mean ``"snell"``/``"none"``.
+    """
     shoaling: bool = True
 
 
@@ -299,6 +318,21 @@ class Config:
         }
 
 
+REFRACTION_MODES = ("snell", "blend", "none")
+
+
+def _refraction_mode(raw) -> str:
+    """Accept the mode by name, or the older boolean spelling."""
+    if isinstance(raw, bool):
+        return "snell" if raw else "none"
+    mode = str(raw).strip().lower()
+    if mode not in REFRACTION_MODES:
+        raise ValueError(
+            f"nearshore.refraction must be one of {REFRACTION_MODES} "
+            f"(or true/false), got {raw!r}")
+    return mode
+
+
 def _tile_from_dict(d: dict) -> TileConfig:
     return TileConfig(size=float(d["size"]), n=int(d["n"]),
                       band=(float(d["band"][0]), float(d["band"][1])))
@@ -345,7 +379,7 @@ def load_config(path: str | Path) -> Config:
         breaker_index=float(near_raw.get("breaker_index", 0.78)),
         foam_halflife=float(near_raw.get("foam_halflife", 3.0)),
         foam_coverage=float(near_raw.get("foam_coverage", 0.85)),
-        refraction=bool(near_raw.get("refraction", True)),
+        refraction=_refraction_mode(near_raw.get("refraction", "snell")),
         shoaling=bool(near_raw.get("shoaling", True)),
     )
     output = OutputConfig(

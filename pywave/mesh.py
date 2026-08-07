@@ -202,7 +202,7 @@ def build_water_mesh(
     region: tuple[float, float, float, float] | None = None,
     trim_depth: float = 0.02,
     margin: float | None = None,
-    refraction: str = "snell",
+    refraction: str | None = None,
     band_limit: bool = True,
     foam: np.ndarray | None = None,
     foam_bathy: Bathymetry | None = None,
@@ -219,6 +219,9 @@ def build_water_mesh(
     trim_depth : cut the mesh at this depth rather than at zero [m].
     margin : landward dilation past the waterline [m]. Defaults to the swash
         excursion, so the swash band has geometry to live on.
+    refraction : ``"snell"``, ``"blend"`` or ``"none"``. ``None`` (the default)
+        takes it from ``cfg.nearshore.refraction``, which is what a scene file
+        expects to control.
     band_limit : drop spectral content above the mesh Nyquist ``pi/dx`` before
         sampling, so it cannot alias into the geometry. On by default; that
         variance reaches the renderer through the ``mss`` channel instead.

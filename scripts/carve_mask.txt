@@ -1,0 +1,22 @@
+## Mask is a mask of all locations where water is present. @P is a line representing the shoreline, calculated by finding the intersection of a grid placed at the water level and the shoreline.
+
+// Only carve if the mask is active (we are in the water)
+if (@mask > 0.5) {
+    // Get exact 3D distance from this water voxel to the shoreline curve
+    float s = xyzdist(1, @P); 
+    
+    // A parameter for Medium Sand
+    float A = 0.100; 
+    
+    // Max depth of the basin (caps it at 8 meters deep)
+    float max_depth = 100.0;
+    
+    // Calculate Dean's equilibrium profile: h(y) = A * y**(2/3)
+    float depth = A * pow(max(s, 0.0), 2.0/3.0); 
+    
+    // Cap the depth so it doesn't dig infinitely in the middle of the ocean
+    depth = min(depth, max_depth);
+    
+    // Subtract the calculated depth from your exact water level
+    @height = 0.95 - depth; 
+}

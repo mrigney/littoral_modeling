@@ -884,3 +884,44 @@ def test_offshore_waves_are_not_annihilated(record, beach, cfg):
                 "non-zero fraction here means Kr is deleting the sea somewhere.",
            passed=worst_zero == 0.0)
     assert worst_zero == 0.0
+
+
+def test_refraction_mode_is_configurable_and_reaches_the_mesh(record, cfg):
+    """`nearshore.refraction` must actually control what the mesh gets.
+
+    It did not. `transform` and `build_water_mesh` both hard-defaulted to
+    "snell", so the config key was parsed, stored, and ignored -- meaning there
+    was no way to turn off the one term that puts seams on a real coastline.
+    """
+    import dataclasses
+
+    from pywave import config as pc, mesh as pw_mesh, tiling
+    from pywave.bathymetry import Bathymetry
+
+    assert pc._refraction_mode(True) == "snell"
+    assert pc._refraction_mode(False) == "none"
+    for m in pc.REFRACTION_MODES:
+        assert pc._refraction_mode(m) == m
+    with pytest.raises(ValueError, match="must be one of"):
+        pc._refraction_mode("bogus")
+
+    ts = tiling.TileSet.build(cfg)
+    bathy = Bathymetry.from_config(cfg, fine=True)
+    region = (400.0, 380.0, 460.0, 402.0)
+
+    heights = {}
+    for mode in pc.REFRACTION_MODES:
+        c = dataclasses.replace(
+            cfg, nearshore=dataclasses.replace(cfg.nearshore, refraction=mode))
+        m = pw_mesh.build_water_mesh(ts, bathy, c, t=0.0, dx=0.5, region=region)
+        heights[mode] = m.vertices[:, 2].copy()
+
+    # blend and none must agree on amplitude -- blend sets Kr = 1 -- while snell
+    # must differ, otherwise the switch is not connected to anything.
+    d_bn = float(np.abs(heights["blend"] - heights["none"]).max())
+    d_sn = float(np.abs(heights["snell"] - heights["none"]).max())
+    record("5", "mesh height: snell vs none", d_sn, unit="m",
+           note=f"blend vs none differs by {d_bn:.2e} m in amplitude terms; "
+                f"snell must differ or the config key is still ignored.",
+           passed=d_sn > 1e-6)
+    assert d_sn > 1e-6, "refraction mode does not reach the mesh"

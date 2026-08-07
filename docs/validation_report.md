@@ -4,12 +4,12 @@
 
 | | |
 |---|---|
-| generated | 2026-08-06 07:04:22 UTC |
-| git_sha | `89e1cd98e0af73053beedd108bca0ec9bcd18794 (working tree dirty)` |
+| generated | 2026-08-07 04:16:35 UTC |
+| git_sha | `71d3a12bd933267168acb4f04fd55770c7dc5cfa (working tree dirty)` |
 | scene | `configs/test_lake.yaml` |
 | python | 3.14.5 (Windows AMD64) |
 | numpy / scipy | 2.5.1 / 1.18.0 |
-| checks recorded | 138 |
+| checks recorded | 139 |
 | exit status | PASS |
 
 Every number below was measured by the test suite against the implementation in this commit. Tolerances are the gate criteria from `littoral-water-implementation-cookbook.md`, except where a deviation is recorded in [Gate deviations](#gate-deviations).
@@ -195,11 +195,12 @@ Notes:
 | cold vs sequential, worst per-cell relative error | 0.006144 | 0 | -- | 1.0e-02 | PASS |
 | spin-up steps for 0.5% residual at 30 fps | 688 | -- | -- | -- | PASS |
 | depth from the coarse vs refined grid, 5 m offshore | 3.0543e-04 m | 0 m | -- | 5.0e-02 | PASS |
-| shipped configs that load and build | 4 | -- | -- | -- | PASS |
+| shipped configs that load and build | 5 | -- | -- | -- | PASS |
 | cropped vs parent bathymetry, worst sampling difference | 0 | 0 | -- | 1.0e-12 | PASS |
 | foam equilibrium across half lives 1-30 s (worst deviation) | 0 | 0 | -- | 1.0e-09 | PASS |
-| shipped configs, foam equilibrium | 4 | -- | -- | -- | PASS |
+| shipped configs, foam equilibrium | 5 | -- | -- | -- | PASS |
 | wet samples with zero wave height, winds all round | 0 | 0 | -- | 0.0e+00 | PASS |
+| mesh height: snell vs none | 0.005569 m | -- | -- | -- | PASS |
 
 Notes:
 
@@ -232,11 +233,12 @@ Notes:
 - **cold vs sequential, worst per-cell relative error** -- Spin-up 92 steps = 23.0 s, initial-condition residual 0.0049. As a fraction of peak coverage the error is 0.121%. The cookbook's suggested 30 frames would leave 79% of the initial condition intact -- the window is set by the half life, not by a frame count.
 - **spin-up steps for 0.5% residual at 30 fps** -- = 22.9 s of simulated time. At the 0.25 s foam step the same window is 92 steps, which is why foam does not sub-step at the frame rate.
 - **depth from the coarse vs refined grid, 5 m offshore** -- Grids are 1 m and 0.25 m; they describe one beach, so a sample must not depend on which is used.
-- **shipped configs that load and build** -- coastal_bay: Hs 1.432 m, Tp 4.75 s; houdini_lake: Hs 0.085 m, Tp 1.05 s; straits: Hs 0.382 m, Tp 2.33 s; test_lake: Hs 0.085 m, Tp 1.05 s.
+- **shipped configs that load and build** -- coastal_bay: Hs 1.432 m, Tp 4.75 s; houdini_lake: Hs 0.085 m, Tp 1.05 s; straits: Hs 0.382 m, Tp 2.33 s; straits_crop: Hs 0.711 m, Tp 2.95 s; test_lake: Hs 0.085 m, Tp 1.05 s.
 - **cropped vs parent bathymetry, worst sampling difference** -- Parent (200, 4000), crop (81, 1001). The crop carries its own origin, so world coordinates are unchanged.
 - **foam equilibrium across half lives 1-30 s (worst deviation)** -- Target 0.85. 1s: 0.850, 3s: 0.850, 6s: 0.850, 12s: 0.850, 30s: 0.850. The rate is derived from the target and the half life, so the coverage a breaking cell reaches no longer depends on how long foam survives.
-- **shipped configs, foam equilibrium** -- coastal_bay: t_half 6s -> 0.850; houdini_lake: t_half 3s -> 0.850; straits: t_half 3s -> 0.850; test_lake: t_half 3s -> 0.850. All below the clip ceiling.
+- **shipped configs, foam equilibrium** -- coastal_bay: t_half 6s -> 0.850; houdini_lake: t_half 3s -> 0.850; straits: t_half 3s -> 0.850; straits_crop: t_half 3s -> 0.850; test_lake: t_half 3s -> 0.850. All below the clip ceiling.
 - **wet samples with zero wave height, winds all round** -- Four wind directions including two blowing offshore. Any non-zero fraction here means Kr is deleting the sea somewhere.
+- **mesh height: snell vs none** -- blend vs none differs by 0.00e+00 m in amplitude terms; snell must differ or the config key is still ignored.
 
 ## Gate 6 -- mesh generation and export
 

@@ -417,7 +417,7 @@ def transform(
     *,
     fields=None,
     order: int = 3,
-    refraction: str = "snell",
+    refraction: str | None = None,
     depth_limit: bool = True,
 ) -> NearshoreField:
     """Apply the nearshore transformation to a composite surface.
@@ -449,6 +449,11 @@ def transform(
     """
     x = np.asarray(x, dtype=np.float64)
     y = np.asarray(y, dtype=np.float64)
+
+    # None means "whatever the scene asked for". Hard-coding "snell" here is how
+    # nearshore.refraction in the config came to be ignored by every mesh.
+    if refraction is None:
+        refraction = getattr(cfg.nearshore, "refraction", "snell")
 
     depth, sdf, normal = bathy.sample(x, y)
     gamma_b = cfg.nearshore.breaker_index
