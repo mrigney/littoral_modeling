@@ -23,6 +23,7 @@ anisotropy — as physically derived numbers rather than art-directed knobs.
 | 6 | Mesh generation, channel packing, PLY export | **Implemented** — constant post spacing; §6.2 LOD rings deliberately deferred |
 | 5b | Refraction on a complex coastline | **Architected**, not built — [docs/phase5b_refraction.md](docs/phase5b_refraction.md) |
 | 7–10 | Mitsuba BSDF, emissivity, EMBER integration | Not started |
+| 11 | Boat wake, turbulent wake, bow spray | **Architected**, not built — [docs/phase11_wake_spray.md](docs/phase11_wake_spray.md) |
 
 **New here?** [docs/gallery.md](docs/gallery.md) explains the whole model in
 eight figures, with no code required.
