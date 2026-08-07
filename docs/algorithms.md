@@ -817,11 +817,68 @@ What is **not** approximated is the coefficient physics: `shoaling_coefficient`
 and `refraction_angle` solve the full dispersion relation and Snell's law, and
 are checked against closed-form answers at every cell.
 
-### The blend alternative, and why it is not used
+### Where this breaks: a complex coastline
+
+Everything above is exact **for straight, parallel depth contours**. On the
+shipped synthetic beaches it holds and the checks below pass. On a real
+shoreline the premise fails, and the failure is visible, not subtle.
+
+`Kr` is a ray-tube result: it compares ray spacing here against ray spacing in
+deep water. That is a statement about a **path**, and it is evaluated at a
+**point** — the cell has no memory of where the wave came from. Three
+consequences:
+
+**1. The direction fed to it is discontinuous.** `shore_normal` is the direction
+to the *nearest shore*, which equals the contour normal only for a straight
+coast. Bathymetry carved as `depth = A·s^(2/3)` from a distance field `s` has a
+**medial axis** — points with two equally-near shore features — where the nearest
+one switches. Measured on a Strait of Hormuz export: `shore_normal` turns 0.445°
+per cell off the axis, and **up to 180°** on it. Depth stays smooth there; the
+direction does not. That is not a defect in the export — the direction to the
+nearest shore genuinely is discontinuous.
+
+**2. `Kr → 0` as `α_deep → 90°`**, a wave running parallel to the shore normal.
+**2.10%** of that water body lies within 3° of the condition, in wedges radiating
+from every shoreline concavity. Gain there: 0.428, against 0.942 with refraction
+off.
+
+**3. Smoothing the input does not rescue it.** Measured: smoothing the contour
+normal at σ from `λp/8` to `λp` cut the p99 roughness by only ~25%. A formula
+whose premise is void is not repaired by tidying its arguments.
+
+Ablation through the real code path, on that export at 0.25 m and 16 m/s:
+
+| mode | min gain | median | p99 jump | **p99.9 one-cell jump** |
+|---|---|---|---|---|
+| `snell` | 0.000 | 0.928 | 0.018 | **0.375** |
+| `blend` | 0.106 | 0.952 | 0.011 | **0.013** |
+| `none` | 0.106 | 0.952 | 0.011 | **0.013** |
+
+A 30× difference, seen in renders as hard seams starting at shoreline
+concavities, running perpendicular offshore, and fading as the waves stop feeling
+the bed.
+
+### Choosing a mode
+
+`nearshore.refraction` selects `snell`, `blend` or `none` (`true`/`false` still
+parse, as `snell`/`none`). `transform` and `build_water_mesh` default to
+whatever the scene asked for.
+
+| Coast | Mode | Why |
+|---|---|---|
+| Synthetic, smooth | `snell` | The straight-contour premise holds |
+| Real, complex | `blend` | Turns the waves, leaves height alone (`Kr = 1`) |
+
+`blend` is a **workaround, not a fix**: it buys a seam-free scene by discarding
+headland focusing, which is real physics. The replacement — ray integration with
+a wave-action balance — is designed in
+[phase5b_refraction.md](phase5b_refraction.md) and not built.
+
+### The blend alternative, and when it is used
 
 The cookbook prescribes a cheaper depth-weighted interpolation toward the shore
-normal, `w = clip(1 − d/d_ref, 0, 1)`. It is implemented as
-`refraction_angle_blend` but is **not** the production path:
+normal, `w = clip(1 − d/d_ref, 0, 1)`, implemented as `refraction_angle_blend`.
+It is **not** the production path on a smooth coast:
 
 - it has no frequency dependence, so every spectral band would turn at the same
   rate, when refraction is dispersive;
@@ -829,8 +886,12 @@ normal, `w = clip(1 − d/d_ref, 0, 1)`. It is implemented as
   angle, which Snell does not.
 
 Measured disagreement on a test transect: **38.5° peak, 29.3° mean**. Snell's
-invariant is conserved to 2.6×10⁻¹⁶, so the exact path costs nothing in accuracy
-and very little in time.
+invariant is conserved to 2.6×10⁻¹⁶, so on a smooth coast the exact path costs
+nothing in accuracy and very little in time.
+
+On a *complex* coast that calculus inverts. `blend` sets `Kr = 1`, which is what
+makes it continuous, and continuity there is worth more than an angle that is
+being computed from a discontinuous input anyway. Hence the mode table above.
 
 ### Verification
 
@@ -1321,7 +1382,7 @@ Everything the model does *not* do exactly, in one place.
 | # | Approximation | Why acceptable here | Where it would bite |
 |---|---|---|---|
 | 1 | Linear wave theory; no Stokes bound harmonics | 8 cm waves, `ka ≈ 0.08` | Steep seas; elevation skewness is ~0 rather than positive |
-| 2 | Refraction rotates vectors, does not re-solve the field | Crest positions matter less than normals for a BSDF | Strong focusing behind a headland |
+| 2 | Refraction rotates vectors, does not re-solve the field | Crest positions matter less than normals for a BSDF | **Realised.** On a complex coast `Kr` is discontinuous and can reach 0; real coasts default to `blend`, dropping focusing. See §11 and [phase5b](phase5b_refraction.md) |
 | 3 | Shoaling scales amplitude, ignores wavelength shortening | Amplitude drives the radiometry | Detailed surf-zone geometry |
 | 4 | One foreshore slope per scene | Uniform coasts | A scene with both cliffs and mudflats |
 | 5 | One fetch per scene | Open coast with a dominant wind | Closed basins, where fetch is direction-dependent |
@@ -1332,7 +1393,7 @@ Everything the model does *not* do exactly, in one place.
 
 ### Deviations from the cookbook
 
-Four, each with the measurement that motivated it — all recorded in the
+Six, each with the measurement that motivated it — all recorded in the
 validation report.
 
 1. **Gate 1's "Hs within 2%"** is unmeetable; JONSWAP's two fits agree at exactly
@@ -1344,8 +1405,21 @@ validation report.
 3. **§5.5's "30 frames of spin-up"** leaves 79% of the initial condition.
    Replaced by deriving the window from the half life.
 4. **§5.3's refraction blend** has no frequency dependence and over-aligns at the
-   waterline. Snell is used instead; the blend is retained and its disagreement
-   measured.
+   waterline, so Snell is used on smooth synthetic coasts and the blend's
+   disagreement is measured (38.5° peak). **On real coastlines that is reversed**:
+   Snell's `Kr` is derived for straight parallel contours and turns the medial
+   axis of a distance-carved bed into a discontinuity in wave height — p99.9
+   one-cell jump 0.375 against 0.013 for the blend. Real coasts therefore ship
+   with `refraction: blend`, which is a workaround for a missing solver rather
+   than a preference; see §11.
+5. **§5.1's "a rigorous treatment needs a mild-slope or Boussinesq solver ...
+   unnecessary at 8 cm wave heights"** was a fair call at 8 cm and is not one at
+   0.4 m on a convoluted shoreline. [phase5b_refraction.md](phase5b_refraction.md)
+   designs the replacement and weighs the three candidate solvers.
+6. **§6.3's displacement** says nothing about band-limiting the surface to the
+   mesh Nyquist before sampling it. Without that, everything the mesh cannot
+   represent folds down onto long wavelengths instead of being handed to the
+   BSDF — measured at +88.5% spurious long-wave power at 4 m posts. See §15.
 
 ---
 

@@ -53,7 +53,7 @@ There are no artistic parameters. The one number that looks like a knob,
 | A surface `h(x, y, t)` with exact analytic slopes | `surface.WaveTile` |
 | Multi-tile composite that hides FFT periodicity | `tiling.TileSet` |
 | Terrain: loaded export, or a synthetic Dean beach | `bathymetry.Bathymetry` |
-| Shoaling, Snell refraction, depth-limited breaking | `nearshore.transform` |
+| Shoaling, refraction (`snell`/`blend`/`none`), depth-limited breaking | `nearshore.transform` |
 | Swash wetness as a duty cycle, for the thermal channel | `nearshore.wetness_fraction` |
 | Foam with bounded, reproducible spin-up | `foam.FoamModel` |
 | Displaced mesh with per-vertex channels | `mesh.build_water_mesh` |
@@ -188,7 +188,10 @@ nearshore:
   breaker_index: 0.78           # gamma_b
   foam_halflife: 3.0            # s
   foam_coverage: 0.85           # coverage a continuously breaking cell reaches
-  refraction: true
+  refraction: blend             # snell | blend | none  (true/false still work)
+                                # 'snell' also scales wave HEIGHT by the ray
+                                # convergence Kr. On a complex coastline that
+                                # puts hard seams in the water -- see below.
   shoaling: true
 
 output:
@@ -218,6 +221,25 @@ rejected at load.
 **`bathymetry.dx` / `surf_dx`** — `surf_dx` must be the finer of the two. It
 exists because the surf zone can be a metre wide, which a 1 m grid cannot resolve
 at all.
+
+**`nearshore.refraction`** — `snell`, `blend` or `none`.
+
+`snell` turns the waves *and* scales their height by the ray-convergence factor
+`Kr`. That factor is derived for **straight, parallel depth contours**, and it is
+computed from the direction to the nearest shore — which flips, by up to 180°,
+wherever a different piece of coast becomes the nearest one. On a real shoreline
+it produces hard seams radiating from every concavity. Measured on a Strait of
+Hormuz export at 0.25 m: p99.9 one-cell jump in wave amplitude **0.375** under
+`snell` against **0.013** under `blend`.
+
+| Your coast | Use | Cost |
+|---|---|---|
+| Synthetic, smooth | `snell` | none — the premise holds |
+| Real, complex | `blend` | loses headland focusing |
+
+`blend` turns the waves toward shore but leaves height alone. It is a workaround
+for a missing solver, not a preference — the replacement is designed in
+[phase5b_refraction.md](phase5b_refraction.md).
 
 **`nearshore.foam_coverage`** — the coverage a continuously breaking cell settles
 at. The seeding rate is *derived* from this and the half life, so the equilibrium
