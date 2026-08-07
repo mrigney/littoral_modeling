@@ -33,5 +33,6 @@ markers = [
     "gate4: Phase 4 gate checks (terrain export loading)",
     "gate5: Phase 5 gate checks (nearshore transformation)",
     "gate6: Phase 6 gate checks (mesh generation and export)",
+    "gate5b: Phase 5b gate checks (refraction on a complex coastline)",
     "slow: takes more than a couple of seconds",
 ]
