@@ -8,6 +8,86 @@ littoral scene of 2–20 m depth.
 
 ---
 
+## 0. Nomenclature
+
+Everything used below, defined once. Angles are radians internally and degrees
+only where a human reads them, as everywhere else in this package
+(`algorithms.md` §2).
+
+### Symbols
+
+| Symbol | Meaning | Units |
+|---|---|---|
+| `g` | acceleration due to gravity, 9.81 | m/s² |
+| `x, y` | horizontal scene coordinates, Z up | m |
+| `z_w` | still-water level — the mean free surface the scene is built on | m |
+| `d` | water depth below `z_w`, positive in water | m |
+| `h` | surface elevation relative to `z_w`; subscripted by which system produces it | m |
+| `ζ` (zeta) | the Kelvin wake's contribution to `h` | m |
+| `t` | scenario time | s |
+| `U` | boat speed through the water | m/s |
+| `L` | boat length overall (LOA) | m |
+| `k` | wavenumber, `k = 2π/λ` | rad/m |
+| `λ` (lambda) | wavelength | m |
+| `λ_T` | **transverse** wake wavelength — the waves running across the track, `λ_T = 2πU²/g` in deep water | m |
+| `λp` | peak wavelength of the **ambient** sea (not the wake); from `summary.md` | m |
+| `ω` (omega) | angular frequency, `ω = 2πf` | rad/s |
+| `θ` (theta) | in the Kelvin integral, the direction a given wave component travels, measured from the boat's track | rad |
+| `A(θ)` | **free-wave spectrum** — the amplitude the hull radiates into direction `θ`. This is where hull shape enters | m·s (per unit `θ`) |
+| `kd` | depth times wavenumber; the deep-water limit is `kd → ∞` | — |
+| `Fr_L` | **length** Froude number, `U/√(gL)`. Sets whether the hull is displacing or planing | — |
+| `Fr_h` | **depth** Froude number, `U/√(gd)`. Sets the wake regime — see §4 | — |
+| `mss` | mean square slope of the surface; the BSDF's roughness comes from it as `α = √mss` | — |
+| `N` | droplet number density in a spray plume | m⁻³ |
+| `r` | droplet radius | m |
+| `Q_ext` | extinction efficiency — how much light a droplet removes relative to its geometric cross-section | — |
+| `σ_ext` | extinction coefficient of the spray medium; optical depth is `σ_ext` × path length | m⁻¹ |
+| `mesh_dx` | water-mesh post spacing | m |
+| `Hs` | significant wave height of the ambient sea, `4√m₀`; the sea state's headline number | m |
+| `α` (alpha) | BSDF surface roughness, `α = √mss` | — |
+| kn | knots, 1 kn = 0.5144 m/s. Used only where a human reads a boat speed | — |
+
+Two easy confusions worth naming:
+
+- **`λ_T` and `λp` are different things.** `λ_T` belongs to the boat and scales as
+  `U²`; `λp` belongs to the wind sea and comes from the spectrum. §8 depends on
+  keeping them apart.
+- **`Fr_L` and `Fr_h` are different things.** `Fr_L` says whether the boat is
+  planing. `Fr_h` says what shape the wake is. A boat can be planing
+  (`Fr_L > 1`) while still subcritical in depth (`Fr_h < 1`), and vice versa.
+
+### Terms
+
+| Term | Meaning |
+|---|---|
+| **6-DOF** | six degrees of freedom: three translations (surge, sway, heave) and three rotations (roll, pitch, yaw) |
+| **LOA** | length overall — the boat's full length, the `L` in `Fr_L` |
+| **Draft** | how deep the hull sits below the waterline |
+| **Wetted surface** | the part of the hull actually in the water; it changes with speed, which is why sinkage and trim matter |
+| **Sinkage / trim** | how much a hull sinks and tilts when underway, relative to its at-rest attitude |
+| **Slender / centreplane** | a hull long compared with its beam and draft; thin-ship theory collapses such a hull onto its vertical centre-plane and puts wave sources there |
+| **Orbital velocity** | the circular motion of water *particles* under a passing wave, distinct from the wave's own travel speed. What a floating boat actually responds to |
+| **Optical depth** | `σ_ext` × path length through a medium; dimensionless. About 3 reads as opaque |
+| **Displacing / planing** | at low speed a hull pushes water aside; above roughly `Fr_L ≈ 1` it rides on hydrodynamic lift, with a very different wetted shape |
+| **Kelvin wake** | the steady V-shaped wave pattern a body radiates by moving; 19.47° half-angle in deep water |
+| **Transverse / divergent waves** | the two families inside the wake — transverse run across the track, divergent feather out toward the wedge edge |
+| **Cusp line** | the wedge boundary, where the two families meet. The brightest feature of a wake |
+| **Caustic** | a place where a ray theory predicts infinite amplitude because neighbouring rays converge to zero spacing. Cusp lines are caustics |
+| **Stationary phase** | the approximation that only wave components whose phase varies slowly contribute; it gives the wake geometry and it is what fails at a caustic |
+| **Airy function** | the correct amplitude shape near a caustic, replacing the infinity with a finite peak and a decaying oscillation |
+| **Thin-ship (Michell) theory** | linearized ship-wave theory that represents a slender hull as sources on its centreplane, yielding `A(θ)` analytically |
+| **Havelock source** | the elementary free-surface wave source those theories are built from |
+| **Wigley hull** | a simple analytic hull form with published resistance curves, used as a validation reference |
+| **Seakeeping: radiation / diffraction** | radiation = waves made by the hull *moving*; diffraction = incident waves *scattered* by a hull held still. Distinct problems, both distinct from the Kelvin wake |
+| **Wave resistance** | drag from making waves. Its "hollows and humps" against speed come from bow/stern interference |
+| **Transcritical / supercritical** | `Fr_h ≈ 1` / `Fr_h > 1`; see §4 |
+| **Participating medium** | a volume that absorbs, scatters and emits along a ray — how a renderer represents fog, smoke or spray, as opposed to a surface |
+| **Phase function** | the angular distribution of scattering within such a medium |
+| **Panel method / BEM** | boundary-element method: solve for flow by discretizing the hull surface. What a proper hull-diffraction treatment needs |
+| **Geometric-optics limit** | when droplets are much larger than the wavelength, so `Q_ext → 2` and no Mie computation is required |
+
+---
+
 ## 1. It is four wave systems, not one
 
 Linear theory decomposes the disturbance exactly:
@@ -138,10 +218,15 @@ Waves that keep station with the hull satisfy a stationary-phase condition. In
 finite depth `k(θ)` solves
 
 ```
-omega(k) = U k cos(theta),   omega^2 = g k tanh(k d)
+omega(k) = U k cos(theta),        the wave keeps station with the boat
+omega^2  = g k tanh(k d)          the dispersion relation, finite depth
 ```
 
-which reduces to `k = g/(U cos θ)²` as `kd -> inf`. The elevation is a 1-D
+The first line says a wave only persists in the pattern if its own phase speed
+along the track matches the boat's speed; the second is the standard relation
+between frequency and wavenumber at depth `d`. Solving them together gives the
+`k(θ)` that survives. It reduces to `k = g/(U cos θ)²` as `kd → ∞`, which is the
+deep-water Kelvin result. The elevation is a 1-D
 integral over `θ`:
 
 ```
@@ -210,8 +295,13 @@ geometric-optics limit, so `Q_ext ~ 2` and extinction is twice the projected are
 per unit volume:
 
 ```
-sigma_ext ~ 2 N pi r^2
+sigma_ext ~ 2 N pi r^2        extinction coefficient [1/m]
+                              N = droplets per m^3, r = droplet radius [m]
+                              the leading 2 is Q_ext in the geometric-optics limit
 ```
+
+Optical depth along a ray of length `L_path` is then `σ_ext · L_path`, and a plume
+is visually opaque once that exceeds about 3.
 
 No Mie computation needed. Droplets sit near water temperature with emissivity
 ~1, so a plume reads as a **warm, semi-opaque volume against a cold sky** — often
@@ -299,7 +389,23 @@ rather than conflicting with it.
 
 ---
 
-## 11. Integration risk: which sea is the boat responding to?
+## 11. References
+
+- Kelvin, W. Thomson (1887). *On ship waves.* The original 19.47° wedge.
+- Michell, J.H. (1898). *The wave resistance of a ship.* Thin-ship theory; the
+  origin of `A(θ)`.
+- Havelock, T.H. (1908, 1932). Free-surface source potentials; wave resistance.
+- **Ursell, F. (1960).** *On Kelvin's ship-wave pattern.* J. Fluid Mech. 8,
+  418–431. The uniform asymptotic (Airy) treatment of the cusp caustic — the
+  reference for milestone 2 and Gate 11.5.
+- Havelock (1908) / Lighthill (1978), *Waves in Fluids* ch. 3, for the
+  finite-depth and transcritical behaviour in §4.
+- Newman, J.N. (1977). *Marine Hydrodynamics.* Standard reference for the
+  seakeeping radiation and diffraction problems in §1.
+
+---
+
+## 12. Integration risk: which sea is the boat responding to?
 
 **Resolve this before writing code.** The motion model presumably takes a sea
 state as input. If it has its own internal wave field rather than consuming ours,
