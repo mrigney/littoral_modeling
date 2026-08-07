@@ -21,6 +21,7 @@ anisotropy — as physically derived numbers rather than art-directed knobs.
 | 4 | Houdini terrain and lake basin | **Loader implemented** — `Bathymetry.from_export` reads a §4.5 export; the Houdini side is yours |
 | 5 | Shoaling, refraction, breaking, foam | **Implemented** against that synthetic profile |
 | 6 | Mesh generation, channel packing, PLY export | **Implemented** — constant post spacing; §6.2 LOD rings deliberately deferred |
+| 5b | Refraction on a complex coastline | **Architected**, not built — [docs/phase5b_refraction.md](docs/phase5b_refraction.md) |
 | 7–10 | Mitsuba BSDF, emissivity, EMBER integration | Not started |
 
 **New here?** [docs/gallery.md](docs/gallery.md) explains the whole model in

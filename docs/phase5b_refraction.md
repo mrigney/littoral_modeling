@@ -1,0 +1,215 @@
+# Phase 5b — refraction on a complex coastline
+
+**Status: architecture only. Nothing here is built.**
+
+A design for replacing the per-cell refraction approximation with something that
+survives a real shoreline, plus the gate that would say it works.
+
+---
+
+## 1. Why the current implementation cannot be patched
+
+Today, for each cell:
+
+```
+alpha_0 = angle between the deep-water wave direction and the local shore normal
+alpha   = Snell's law applied to that angle at the local depth
+Kr      = sqrt(|cos alpha_0| / |cos alpha|)
+H       = H_deep * Ks * Kr
+```
+
+That `Kr` is a **ray-tube result derived for straight, parallel depth contours**.
+Between two contours the ray spacing changes by `cos alpha / cos alpha_0`, energy
+flux is conserved, and the height follows. The derivation needs the contours to
+be straight and parallel *along the whole ray path*.
+
+On the shipped synthetic beaches they are, so the formula is right there and the
+Gate 5 checks pass. On a real coastline the premise is false, and three things
+break — none of which is a coding error:
+
+**a. The formula is evaluated per cell, but it is a statement about a path.**
+`Kr` compares ray spacing *here* with ray spacing *in deep water*. There is no
+ray. The cell has no memory of where the wave came from, so waves that should
+have been bent long before arriving are treated as arriving straight.
+
+**b. `shore_normal` is discontinuous, and legitimately so.** The bed is carved as
+`depth = A * s^(2/3)` with `s` the distance to the shoreline. Any distance field
+has a **medial axis** — points with two equally-near sources — where the
+direction to the nearest source flips. Measured on the Strait of Hormuz export:
+turn per cell of 0.445° off the axis against **up to 180°** on it. Depth stays
+smooth; direction does not. Feed a 180° flip to `Kr` and it returns a
+discontinuity.
+
+Note this is *not* a defect in the export. The direction to the nearest shore
+genuinely is discontinuous there. The defect is treating it as the contour
+normal, which it only equals for a straight coast.
+
+**c. `Kr -> 0` as `alpha_0 -> 90°`.** A wave running parallel to the shore normal
+has a ray tube that never reaches the beach, and the formula annihilates it.
+**2.10%** of that water body is within 3° of that condition, in wedges radiating
+from every concavity. Gain there: 0.428 against 0.942 without refraction.
+
+Smoothing the input does not rescue this — measured, smoothing the contour normal
+at sigma from `lambda_p/8` to `lambda_p` reduced the p99 roughness by only ~25%.
+A formula whose premise is void is not fixed by tidying its arguments.
+
+---
+
+## 2. What the replacement has to do
+
+| Requirement | Why |
+|---|---|
+| Continuous `H` wherever the bed is continuous | The seams are the whole problem |
+| Focusing on headlands, sheltering in bays | The physics worth keeping |
+| No dependence on `shore_normal` | Discontinuous by construction |
+| Directional spread, not one ray direction | A wind sea is not monochromatic |
+| Deterministic, seed-reproducible | The existing contract |
+| Precomputable per scene, not per frame | Animation must stay affordable |
+
+That last row is the key architectural constraint: the wave field is
+**stationary** given a bed and a sea state. Whatever we solve, we solve **once
+per scene** and store as fields on the bathymetry grid, exactly as `foam` and
+`wetness` already are. Per-frame cost must stay at today's level.
+
+---
+
+## 3. Three candidate solvers
+
+### 3a. Ray tracing / wave-action balance — *recommended*
+
+Integrate rays from deep water toward shore, obeying
+
+```
+d(x)/dt = c_g * (cos theta, sin theta)
+d(theta)/dt = -(1/k) * dk/dn          (rays bend toward shallow)
+```
+
+and conserve wave action `E/omega` in each ray tube. `Kr` becomes the *measured*
+tube width ratio rather than an assumed one. Cast rays for a fan of deep-water
+directions weighted by the spreading function, accumulate energy onto the grid,
+and `Hs_local` is the accumulated energy — continuous by construction because
+energy is deposited by many overlapping tubes.
+
+- **Handles:** focusing, sheltering, diffraction-free shadowing, caustics-as-
+  bright-regions.
+- **Fails at:** true diffraction (energy leaking into geometric shadow behind an
+  island), and caustics where tube width goes to zero.
+- **Cost:** `O(n_rays * path_length / step)`. For 7.5 × 8.6 km at 5 m steps and
+  ~40 directions × ~2000 launch points, roughly **10^8 steps** — minutes,
+  single-threaded, once per scene. Embarrassingly parallel over rays; 96 cores
+  brings it to seconds.
+- **Effort:** the largest piece, but self-contained. New module, no changes to
+  the surface synthesis.
+
+### 3b. Mild-slope equation
+
+Solve the elliptic mild-slope equation for the complex wave amplitude over the
+whole domain:
+
+```
+div(c*c_g*grad(phi)) + k^2*c*c_g*phi = 0
+```
+
+- **Handles:** refraction *and* diffraction, correctly, in one solve. This is the
+  reference answer.
+- **Cost:** a sparse linear solve on the full grid **per frequency and per
+  direction**. On a 2804² grid that is ~7.9 M unknowns, complex-valued, and it is
+  a Helmholtz problem — notoriously ill-conditioned for iterative solvers at high
+  wavenumber. Needs ~10 frequencies × ~10 directions. **Hours**, and a hard
+  dependency on a serious sparse solver.
+- **Verdict:** correct but disproportionate. Worth building as an *offline
+  reference* on a small domain to validate 3a against, not as the production path.
+
+### 3c. Boussinesq / non-linear shallow water
+
+Time-march the depth-averaged non-linear equations with dispersive correction
+terms. This is what COULWAVE / FUNWAVE do.
+
+- **Handles:** everything above, plus non-linear shoaling, wave-wave interaction,
+  harmonic generation, run-up, and breaking as an emergent process rather than a
+  `gamma_b` cap.
+- **Cost:** an explicit time step on the full grid, CFL-limited. Resolving
+  `lambda_p = 13.6 m` needs ~1 m cells; CFL at 18 m depth gives `dt ~ 0.05 s`;
+  spin-up needs minutes of wave time. That is **10^4–10^5 steps on 10^7 cells** —
+  GPU work, hours per scene, and it produces a *time series* rather than a
+  stationary field.
+- **Verdict:** wrong tool for this job. It would replace the entire FFT surface
+  synthesis, not just refraction, and it discards the reproducibility and
+  spectral-truth properties the whole model is built on. Worth knowing as the
+  physical ceiling; not worth building.
+
+**Recommendation: 3a for production, 3b offline on a small domain as the
+validation reference, 3c never.**
+
+---
+
+## 4. Architecture
+
+```
+pywave/rays.py                       NEW
+    RayField.solve(bathy, cfg)       -> stationary energy + direction fields
+    RayField.sample(x, y)            -> (gain, theta) at arbitrary points
+    RayField.save/load(dir)          cached per (bathy hash, sea state)
+
+pywave/nearshore.py                  CHANGED
+    refraction mode gains "rays"; snell/blend/none stay
+    transform() reads gain and theta from a RayField when mode == "rays"
+
+pywave/bathymetry.py                 UNCHANGED
+scripts/run_scene.py                 solves once, caches, reports timing
+```
+
+The `RayField` is a scene-level artifact like the foam spin-up: computed once,
+cached to `runs/<scene>/rays/`, keyed by a hash of the bathymetry and sea state
+so it invalidates correctly. **Per-frame cost is a bilinear sample — unchanged
+from today.**
+
+### Runtime impact
+
+| Stage | Today | With rays |
+|---|---|---|
+| Scene setup | ~1 min (foam spin-up dominates) | **+ minutes** (once, parallel) |
+| Per mesh frame | unchanged | unchanged |
+| Animation of N frames | N × frame | N × frame + one solve |
+| Memory | — | 2 extra float32 fields on the bathy grid |
+
+The one-off cost lands in the same place the foam spin-up already does, which is
+the honest place for it.
+
+---
+
+## 5. Gate 5b
+
+Each check has a number, not a vibe. Gates 1–6 style.
+
+| # | Check | Criterion |
+|---|---|---|
+| 5b.1 | **Straight beach reduces to Snell.** On a planar coast, ray `Kr` vs the analytic formula | within 2% |
+| 5b.2 | **Continuity.** p99.9 one-cell jump in gain on the straits export | < 0.02 (matching `blend`, against 0.375 today) |
+| 5b.3 | **No annihilation.** min gain over all wet cells | > 0.05 |
+| 5b.4 | **Focusing survives.** mean gain on headlands vs adjacent bays | ratio > 1.2 |
+| 5b.5 | **Energy conservation.** total flux in vs out across a deep-water control line | within 5% |
+| 5b.6 | **Independence from `shore_normal`.** perturb `shore_normal` by 30°, resolve | gain unchanged to 1e-12 |
+| 5b.7 | **Mild-slope agreement.** vs a 3b solve on a 500 m test domain | correlation > 0.9 |
+| 5b.8 | **Reproducibility.** same scene twice | bitwise identical |
+| 5b.9 | **Cost.** solve time on the 7.5 × 8.6 km straits export | recorded, not capped |
+
+5b.6 is the one that would have caught today's bug, and it is worth writing first.
+
+### Deliberately out of scope
+
+Diffraction behind islands (needs 3b), wave–current interaction, reflection off
+cliffs, non-linear transfer. Each gets a note in the approximations table.
+
+---
+
+## 6. Suggested order
+
+1. Gate 5b.6 as a failing test against today's code — pins the bug.
+2. `rays.py` with a straight beach only; pass 5b.1.
+3. Real bathymetry; pass 5b.2, 5b.3.
+4. Caching and `run_scene` integration; 5b.8, 5b.9.
+5. Focusing and energy checks; 5b.4, 5b.5.
+6. Mild-slope reference on a small domain; 5b.7.
+
+Steps 1–4 give a usable, seam-free result. 5–6 are what make it defensible.
