@@ -4,12 +4,12 @@
 
 | | |
 |---|---|
-| generated | 2026-08-07 05:45:11 UTC |
-| git_sha | `eb7ec4708d305b668d4fb36ec43833222bff5335 (working tree dirty)` |
+| generated | 2026-08-07 12:27:38 UTC |
+| git_sha | `885b1bcb0394d3bd9186af27a2b0deb402440293 (working tree dirty)` |
 | scene | `configs/test_lake.yaml` |
 | python | 3.14.5 (Windows AMD64) |
 | numpy / scipy | 2.5.1 / 1.18.0 |
-| checks recorded | 140 |
+| checks recorded | 144 |
 | exit status | PASS |
 
 Every number below was measured by the test suite against the implementation in this commit. Tolerances are the gate criteria from `littoral-water-implementation-cookbook.md`, except where a deviation is recorded in [Gate deviations](#gate-deviations).
