@@ -41,9 +41,22 @@ spectrum:
   seed: 20260801
 
 surface:
-  tiles:                        # incommensurate sizes, disjoint bands
-    - {size: 64.0, n: 512, band: [0.0, 0.35]}
-    - {size: 37.0, n: 256, band: [0.35, 0.7]}
+  # Sized for THIS scene's sea, not the test lake's. lambda_p here is 13.6 m
+  # against the lake's 1.7 m, and the lake's 64/37/23 m tiles put the first band
+  # edge at 16.4 k_p -- so band 1 carried 99.7% of the variance and the other
+  # two FFTs bought nothing. Two separate jobs, so two separate rules:
+  #
+  #   tiles 1-2  set where the bands split. Their Nyquists fix k_ref, and the
+  #              first edge is 0.35*k_ref -- aim for 1.5-3 k_p. Here 2.01.
+  #   tile 3     sets the top of the resolved range, and therefore where the
+  #              mesh/BSDF handoff lands. Left at 23 m so k_max stays 34.97.
+  #
+  # Sizes stay incommensurate (607/271 = 2.24, 271/23 = 11.8).
+  # Result: variance splits 82.5/12.6/4.9 instead of 99.7/0.2/0.1, with Hs,
+  # k_max and mss all unchanged to four decimals. It is a redistribution.
+  tiles:
+    - {size: 607.0, n: 512, band: [0.0, 0.35]}
+    - {size: 271.0, n: 256, band: [0.35, 0.7]}
     - {size: 23.0, n: 256, band: [0.7, 1.0]}
   choppiness: 1.0
 

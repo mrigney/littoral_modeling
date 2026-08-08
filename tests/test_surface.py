@@ -16,6 +16,8 @@ Two checks here earn their keep by catching errors nothing else catches:
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 from scipy.stats import kurtosis, skew
@@ -23,6 +25,8 @@ from scipy.stats import kurtosis, skew
 from pywave import moments, spectrum, surface, tiling
 
 pytestmark = pytest.mark.gate2
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _jacobian_weighted_moments(h: np.ndarray, j: np.ndarray):
@@ -487,3 +491,78 @@ def test_composite_rotates_vectors_back_to_world(cfg, scene):
     ang_a = np.arctan2(np.mean(a.slope_y**2), np.mean(a.slope_x**2))
     ang_b = np.arctan2(np.mean(b.slope_y**2), np.mean(b.slope_x**2))
     assert abs(ang_a - ang_b) < 0.25
+
+
+# ---------------------------------------------------------------------------
+# Tile sizing -- the failure mode that leaves every other number correct
+# ---------------------------------------------------------------------------
+
+
+def test_every_shipped_scene_has_tiles_sized_for_its_own_sea(record):
+    """Tile sizes are not a scene-independent constant, and drift is silent.
+
+    Reusing one tile set across scenes passes every existing check: `Hs` is
+    right, the bands still sum, the LOD invariant still closes. What quietly
+    stops working is the *reason* the bands are disjoint -- per-band shoaling
+    and refraction. Push the first band edge far above `k_p` and band 1
+    swallows the spectrum, so three FFTs a frame compute one representative
+    frequency between them.
+
+    Measured before this was checked: `straits_crop` inherited the test lake's
+    64/37/23 m tiles against a peak wavelength eight times longer, putting its
+    first edge at 16.4 k_p and 99.7% of the variance in one band.
+    """
+    from pywave import load_config
+
+    worst_name, worst_share, rows = "", 0.0, []
+    for name in ("test_lake", "coastal_bay", "straits_crop"):
+        cfg = load_config(REPO_ROOT / "configs" / f"{name}.yaml")
+        s = tiling.TileSet.build(cfg).sizing()
+        rows.append(f"{name} {s.first_edge_over_k_p:.1f} k_p "
+                    f"({s.band_shares[0]:.1%} in band 1)")
+        if s.band_shares[0] > worst_share:
+            worst_name, worst_share = name, s.band_shares[0]
+        assert not s.notes, f"{name}: {' '.join(s.notes)}"
+
+    record("2", "worst band-1 variance share across shipped scenes", worst_share,
+           tol=0.95, unit="",
+           note=f"{'; '.join(rows)}. Above 0.95 the disjoint bands cost three "
+                f"FFTs a frame and buy nothing, because every frequency-"
+                f"dependent nearshore effect collapses to one representative "
+                f"frequency. Worst is {worst_name}.",
+           passed=worst_share < 0.95)
+    assert worst_share < 0.95
+
+
+def test_resizing_tiles_redistributes_energy_without_changing_it(record):
+    """Moving the band edges must not move `Hs`, `k_max` or resolved `mss`.
+
+    This is what makes a resize safe to apply to a scene that is already
+    validated: the split across bands changes, the sea does not. If any of
+    these moved, the resize would be a different sea wearing the same config.
+    """
+    import dataclasses
+
+    from pywave import load_config
+
+    cfg = load_config(REPO_ROOT / "configs" / "straits_crop.yaml")
+    good = tiling.TileSet.build(cfg)
+
+    # The old, badly sized set: the test lake's tiles on a 13.6 m sea.
+    stale = tuple(dataclasses.replace(t, size=s, n=n) for t, (s, n) in
+                  zip(cfg.surface.tiles, ((64.0, 512), (37.0, 256), (23.0, 256))))
+    bad = tiling.TileSet.build(
+        dataclasses.replace(cfg, surface=dataclasses.replace(cfg.surface,
+                                                             tiles=stale)))
+
+    d_hs = abs(good.hs() / bad.hs() - 1)
+    d_mss = abs(good.mss() / bad.mss() - 1)
+    assert good.k_max == pytest.approx(bad.k_max, rel=1e-12)
+    record("2", "Hs shift from resizing tiles", d_hs, reference=0.0, tol=1e-3,
+           unit="",
+           note=f"band 1 share moves {bad.sizing().band_shares[0]:.1%} -> "
+                f"{good.sizing().band_shares[0]:.1%} while Hs moves {d_hs:.2e} "
+                f"and resolved mss {d_mss:.2e}, with k_max identical. A resize "
+                f"is a redistribution, not a different sea.",
+           passed=d_hs < 1e-3 and d_mss < 1e-3)
+    assert d_hs < 1e-3 and d_mss < 1e-3

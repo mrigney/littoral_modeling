@@ -4,12 +4,12 @@
 
 | | |
 |---|---|
-| generated | 2026-08-08 04:42:51 UTC |
-| git_sha | `5ecb415e6fc0062fb5156a74ed8fd3a7549f906b (working tree dirty)` |
+| generated | 2026-08-08 14:58:18 UTC |
+| git_sha | `4431009ed30b25aacc94b83edff71c18d67a1920 (working tree dirty)` |
 | scene | `configs/test_lake.yaml` |
 | python | 3.14.5 (Windows AMD64) |
 | numpy / scipy | 2.5.1 / 1.18.0 |
-| checks recorded | 151 |
+| checks recorded | 153 |
 | exit status | PASS |
 
 Every number below was measured by the test suite against the implementation in this commit. Tolerances are the gate criteria from `littoral-water-implementation-cookbook.md`, except where a deviation is recorded in [Gate deviations](#gate-deviations).
@@ -92,6 +92,8 @@ Notes:
 | crest phase speed | 4.9981 m/s | 4.9981 m/s | 3.06e-07 | 5.0e-02 | PASS |
 | Tz from zero crossings | 0.91164 s | 0.925231 s | 1.47e-02 | 1.0e-01 | PASS |
 | Hs loss, cubic sampling (order=3) | 0.013306 | 0 | -- | 3.0e-02 | PASS |
+| worst band-1 variance share across shipped scenes | 0.841024 | -- | -- | 9.5e-01 | PASS |
+| Hs shift from resizing tiles | 6.9820e-04 | 0 | -- | 1.0e-03 | PASS |
 
 Notes:
 
@@ -111,6 +113,8 @@ Notes:
 - **crest phase speed** -- Single mode, k = 0.3927 rad/m, along +x. A sign error in the time evolution would give -4.9981 m/s.
 - **Tz from zero crossings** -- 256 probe points, 48 s at 24 Hz, 27005 crossings. Theory banded to k in [0.098, 12.57] rad/m. Against the untruncated Tz of 0.816 s the error would be 11.7%.
 - **Hs loss, cubic sampling (order=3)** -- Bilinear (order=1) loses 5.8% for comparison, and the standalone bilinear routine loses 2.3% of one tile's standard deviation. At the Nyquist, bilinear retains only 1/3 of the power.
+- **worst band-1 variance share across shipped scenes** -- test_lake 2.1 k_p (84.1% in band 1); coastal_bay 2.0 k_p (82.5% in band 1); straits_crop 2.0 k_p (82.5% in band 1). Above 0.95 the disjoint bands cost three FFTs a frame and buy nothing, because every frequency-dependent nearshore effect collapses to one representative frequency. Worst is test_lake.
+- **Hs shift from resizing tiles** -- band 1 share moves 99.7% -> 82.5% while Hs moves 6.98e-04 and resolved mss 1.44e-04, with k_max identical. A resize is a redistribution, not a different sea.
 
 ## Gate 3 -- reproducibility and regression
 
@@ -233,7 +237,7 @@ Notes:
 - **cold vs sequential, worst per-cell relative error** -- Spin-up 92 steps = 23.0 s, initial-condition residual 0.0049. As a fraction of peak coverage the error is 0.121%. The cookbook's suggested 30 frames would leave 79% of the initial condition intact -- the window is set by the half life, not by a frame count.
 - **spin-up steps for 0.5% residual at 30 fps** -- = 22.9 s of simulated time. At the 0.25 s foam step the same window is 92 steps, which is why foam does not sub-step at the frame rate.
 - **depth from the coarse vs refined grid, 5 m offshore** -- Grids are 1 m and 0.25 m; they describe one beach, so a sample must not depend on which is used.
-- **shipped configs that load and build** -- coastal_bay: Hs 1.432 m, Tp 4.75 s; houdini_lake: Hs 0.085 m, Tp 1.05 s; straits: Hs 0.382 m, Tp 2.33 s; straits_crop: Hs 0.711 m, Tp 2.95 s; test_lake: Hs 0.085 m, Tp 1.05 s.
+- **shipped configs that load and build** -- coastal_bay: Hs 1.432 m, Tp 4.75 s; houdini_lake: Hs 0.085 m, Tp 1.05 s; straits: Hs 0.382 m, Tp 2.33 s; straits_crop: Hs 0.712 m, Tp 2.95 s; test_lake: Hs 0.085 m, Tp 1.05 s.
 - **cropped vs parent bathymetry, worst sampling difference** -- Parent (200, 4000), crop (81, 1001). The crop carries its own origin, so world coordinates are unchanged.
 - **foam equilibrium across half lives 1-30 s (worst deviation)** -- Target 0.85. 1s: 0.850, 3s: 0.850, 6s: 0.850, 12s: 0.850, 30s: 0.850. The rate is derived from the target and the half life, so the coverage a breaking cell reaches no longer depends on how long foam survives.
 - **shipped configs, foam equilibrium** -- coastal_bay: t_half 6s -> 0.850; houdini_lake: t_half 3s -> 0.850; straits: t_half 3s -> 0.850; straits_crop: t_half 3s -> 0.850; test_lake: t_half 3s -> 0.850. All below the clip ceiling.

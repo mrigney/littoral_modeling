@@ -26,12 +26,22 @@ spectrum:
   seed: 4711
 
 surface:
-  # Tiles must resolve the peak: lambda_p ~ 27 m, so the coarse tile needs to be
-  # many peak wavelengths across, and the fine tile still needs its Nyquist above
-  # the capillary rolloff we care about. Sizes stay incommensurate.
+  # Resolving the peak is necessary and not sufficient. The old 1024/593/367 m
+  # set cleared k_p comfortably and still put the first band edge at 5.3 k_p,
+  # leaving 97.3% of the variance in band 1 -- three FFTs a frame doing one
+  # band's work. Two separate jobs, so two separate rules:
+  #
+  #   tiles 1-2  set where the bands split. Their Nyquists fix k_ref, and the
+  #              first edge is 0.35*k_ref -- aim for 1.5-3 k_p. Here 2.00.
+  #   tile 3     sets the top of the resolved range, and therefore where the
+  #              mesh/BSDF handoff lands. Left alone so k_max stays 4.38.
+  #
+  # Sizes stay incommensurate (1583/719 = 2.20, 719/367 = 1.96).
+  # Variance now splits 82.5/12.7/4.8 rather than 97.3/2.1/0.6, with Hs, k_max
+  # and mss unchanged -- and tiles 1 and 2 got cheaper, not dearer.
   tiles:
-    - {size: 1024.0, n: 1024, band: [0.0, 0.35]}
-    - {size: 593.0, n: 512, band: [0.35, 0.7]}
+    - {size: 1583.0, n: 512, band: [0.0, 0.35]}
+    - {size: 719.0, n: 256, band: [0.35, 0.7]}
     - {size: 367.0, n: 512, band: [0.7, 1.0]}
   choppiness: 1.0
 

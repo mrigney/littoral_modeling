@@ -31,6 +31,7 @@ __all__ = [
     "sample_bilinear_periodic",
     "sample_periodic",
     "TileSet",
+    "TileSizing",
     "composite_surface",
 ]
 
@@ -180,6 +181,61 @@ def sample_periodic(field: np.ndarray, x, y, size: float, order: int = 3) -> np.
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class TileSizing:
+    """Whether a tile set is sized for the sea it is carrying.
+
+    Tile sizes are not a scene-independent constant, and the way they go wrong
+    is silent: every gate still passes, every number still reconciles, and the
+    band machinery simply stops doing anything.
+
+    The documented rule -- "at least one tile's Nyquist must clear ``k_p``" --
+    only guards the **top** of the range. What decides whether the bands earn
+    their keep is the **first interior edge**, and nothing was checking it.
+    Because JONSWAP's shape is universal in ``f/f_p``, the variance split is a
+    pure function of where that edge sits in units of ``k_p``:
+
+    ==============  ==================
+    first edge      band 1 then holds
+    ==============  ==================
+    1.5 k_p         71.9%
+    2 k_p           82.4%
+    3 k_p           91.5%
+    8 k_p           98.7%
+    16 k_p          99.7%
+    ==============  ==================
+
+    So a tile set tuned for 1.7 m chop and then pointed at a 13.6 m sea puts its
+    first edge at 16 k_p and collapses the whole spectrum into one band.
+
+    Note what is *not* here: tile size has no measurable effect on spectral
+    accuracy. Holding the Nyquist fixed and growing the largest tile from 4.7 to
+    75 peak wavelengths moves the realised ``Hs`` by 0.08%, because the build
+    integrates the spectrum over each grid cell rather than point-sampling it.
+    The reason to want a large tile is spatial repetition, which is a different
+    complaint with a different remedy.
+    """
+
+    lambda_p: float
+    """Peak wavelength of the scene's sea [m]."""
+    k_p: float
+    """Peak wavenumber [rad/m]."""
+    first_edge_over_k_p: float
+    """First interior band edge, in units of ``k_p``. Aim for 1.5-3."""
+    band_shares: tuple[float, ...]
+    """Fraction of the total variance each band carries."""
+    largest_tile_m: float
+    largest_tile_over_lambda_p: float
+    domain_m: float
+    notes: tuple[str, ...]
+    """Human-readable findings. Empty means nothing looked wrong."""
+
+    @property
+    def bands_are_inert(self) -> bool:
+        """True when one band holds so much that per-band physics is moot."""
+        return bool(self.band_shares) and max(self.band_shares) > 0.95
+
+
 @dataclass
 class TileSet:
     """A set of band-limited tiles that sum to the full-band surface."""
@@ -300,6 +356,50 @@ class TileSet:
     def k_max(self) -> float:
         """Highest wavenumber the composite resolves [rad/m]."""
         return max(t.band[1] for t in self.tiles)
+
+    def sizing(self) -> "TileSizing":
+        """Is this tile set sized for *this* scene's sea? See :class:`TileSizing`."""
+        if self.cfg is None:
+            raise ValueError(
+                "sizing() needs the config this set was built from; use "
+                "TileSet.build(cfg) rather than assembling tiles directly")
+        cfg = self.cfg
+        k_p = cfg.k_p
+        total = self.m0()
+        shares = tuple(float(t.m0() / total) if total > 0 else 0.0
+                       for t in self.tiles)
+        first_edge = self.tiles[0].band[1] if len(self.tiles) > 1 else float("inf")
+        biggest = max(t.size for t in self.tiles)
+        domain = float(max(cfg.scene.domain))
+
+        notes = []
+        if len(self.tiles) > 1 and shares[0] > 0.95:
+            notes.append(
+                f"band 1 carries {shares[0]:.1%} of the variance: its top edge "
+                f"is at {first_edge / k_p:.1f} k_p, far above the peak. Every "
+                f"frequency-dependent nearshore effect is then computed at one "
+                f"representative frequency, so the disjoint bands are costing "
+                f"{len(self.tiles)} FFTs per frame and buying nothing. Size the "
+                f"tiles so the first edge lands near 1.5-3 k_p.")
+        # Deliberately measured against the peak wavelength and not against the
+        # domain. A tile smaller than the domain is the normal case and not a
+        # defect: incommensurate sizes and golden-angle rotations mean the
+        # *composite* does not repeat even though each tile does. What a short
+        # tile really costs is variety -- it holds only a few wave groups, and
+        # those few recur.
+        if biggest < 10.0 * cfg.lambda_p:
+            notes.append(
+                f"the largest tile is {biggest:.0f} m, only "
+                f"{biggest / cfg.lambda_p:.1f} peak wavelengths across, so it "
+                f"contains just a handful of wave groups and those groups "
+                f"recur. This costs variety, not energy: holding the Nyquist "
+                f"fixed, tile size moves the realised Hs by under 0.1%.")
+        return TileSizing(
+            lambda_p=cfg.lambda_p, k_p=k_p,
+            first_edge_over_k_p=float(first_edge / k_p),
+            band_shares=shares, largest_tile_m=float(biggest),
+            largest_tile_over_lambda_p=float(biggest / cfg.lambda_p),
+            domain_m=domain, notes=tuple(notes))
 
     def evaluate_grids(self, t: float) -> tuple[SurfaceField, ...]:
         """Evaluate every tile on its own grid.  Cache this if sampling repeatedly."""

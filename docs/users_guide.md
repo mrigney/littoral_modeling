@@ -204,15 +204,68 @@ output:
 
 ### Keys that need care
 
-**`surface.tiles`** — the two ways to get this wrong:
+**`surface.tiles`** — the three ways to get this wrong. **Tile sizes are not a
+scene-independent constant: they must be re-derived whenever `λ_p` changes.**
 
 - **Tiles must resolve the peak.** A tile's Nyquist is `π·n/size`, and at least
   one tile needs a Nyquist comfortably above `k_p = 2π/λ_p`. Doubling the wind
   roughly quadruples `λ_p`, so a tile set tuned for chop will not do for swell.
   Asserted at run time and in the test suite.
+- **Put the first band edge near the peak.** This is the one that fails
+  silently. Resolving the peak only guards the *top* of the range; what decides
+  whether the bands do any work is the **first interior edge**, at
+  `0.35 · k_ref` where `k_ref` is the smallest tile Nyquist. Because JONSWAP's
+  shape is universal in `f/f_p`, the split follows from that edge alone:
+
+  | first edge | band 1 then holds |
+  |---|---|
+  | 1.5 k_p | 71.9% |
+  | 2 k_p | 82.4% |
+  | 3 k_p | 91.5% |
+  | 8 k_p | 98.7% |
+  | 16 k_p | 99.7% |
+
+  **Aim for 1.5–3 k_p.** Push it past ~8 and one band holds the whole spectrum,
+  so per-band shoaling and refraction collapse to a single representative
+  frequency — three FFTs a frame doing one band's work. Nothing else goes
+  wrong: `Hs` is still right, the bands still sum, the LOD invariant still
+  closes. `TileSet.sizing()` reports it and `run_scene` prints it.
+
 - **Keep sizes incommensurate.** 64/37/23, not 64/32/16. Sizes in simple ratios
   re-align their lattices and the periodicity the construction exists to hide
   comes straight back.
+
+The two constraints pull in opposite directions, so give them to different
+tiles:
+
+| | job | scale it with |
+|---|---|---|
+| tiles 1–2 | set where the bands split — their Nyquists fix `k_ref` | `λ_p` |
+| tile 3 | sets `k_max`, and so where the mesh/BSDF handoff lands | `output.mesh_dx` |
+
+Resizing on that rule is a **redistribution, not a different sea** — measured on
+`straits_crop`, moving band 1 from 99.7% to 82.5% left `Hs`, `k_max` and
+resolved `mss` unchanged to four decimals. It is safe to apply to a scene you
+have already validated.
+
+Two things that are *not* reasons to resize. Tile size has no measurable effect
+on spectral accuracy: holding the Nyquist fixed and growing the largest tile
+from 4.7 to 75 peak wavelengths moves the realised `Hs` by 0.08%, because the
+build integrates the spectrum over each grid cell rather than point-sampling it.
+And a tile smaller than the domain is normal, not a defect — incommensurate
+sizes and golden-angle rotations mean the *composite* does not repeat even
+though each tile does. What a short tile actually costs is variety: below about
+10 `λ_p` it holds only a handful of wave groups, and those recur.
+
+**How many tiles?** Three, and changing that is almost never the answer.
+Splitting the same range into more bands converges fast — the band-count error
+on `Hs` is 0.95% at N=3, 0.39% at N=5, 0.18% at N=12 — while the FFT cost is
+linear in tile count. Extending the range *upward* matters far more (at 8 k_p
+you have 98.7% of the height variance but only 16% of the slope variance), but
+tiles are not the lever: raise `n` on the finest tile, or lower `mesh_dx`.
+Everything above the mesh Nyquist is already handed to the BSDF by
+`submesh_mss` under the LOD invariant `mss_resolved(dx) + mss_above(π/dx) =
+mss_total`, so extra tiles above it would be counted twice.
 
 `band` values are *fractions*, not wavenumbers. They must be contiguous,
 disjoint, and span exactly `[0, 1]` — a gap silently loses variance, so it is

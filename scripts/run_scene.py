@@ -72,6 +72,7 @@ def scene_summary(scene) -> dict:
     cfg = scene.cfg
     u10, fetch, gamma = cfg.wind.speed, cfg.wind.fetch, cfg.spectrum.gamma
     ts = scene.tileset
+    sizing = ts.sizing()
     beach = scene.bathy
     alpha, f_p, x_tilde = cfg.jonswap
 
@@ -129,6 +130,14 @@ def scene_summary(scene) -> dict:
                  "rotation_deg": float(np.degrees(t.rotation))}
                 for t in ts.tiles
             ],
+            "sizing": {
+                "lambda_p_m": sizing.lambda_p,
+                "first_edge_over_k_p": sizing.first_edge_over_k_p,
+                "band_shares": list(sizing.band_shares),
+                "largest_tile_over_lambda_p": sizing.largest_tile_over_lambda_p,
+                "bands_are_inert": sizing.bands_are_inert,
+                "notes": list(sizing.notes),
+            },
             "Hs_composite_m": ts.hs(),
             "k_max_rad_m": ts.k_max,
             "mss_resolved": ts.mss(),
@@ -239,10 +248,20 @@ def write_summary_md(summary: dict, path: Path) -> None:
             f"| {i} | {_fmt(t['size_m'])} m | {t['n']} | "
             f"{lo:.2f} – {hi:.2f} | {2 * np.pi / hi:.2f} – {lam_hi} | "
             f"{4 * np.sqrt(t['m0_m2']):.4f} |")
+    sz = s["surface"]["sizing"]
     lines += [
         "",
         f"Composite Hs **{_fmt(s['surface']['Hs_composite_m'])} m**, resolving "
         f"wavenumbers to {_fmt(s['surface']['k_max_rad_m'])} rad/m.",
+        "",
+        f"Tiles are sized for a peak wavelength of {sz['lambda_p_m']:.1f} m. The "
+        f"first band edge sits at **{sz['first_edge_over_k_p']:.1f} k_p** "
+        f"(aim for 1.5–3), splitting the variance "
+        f"{' / '.join(f'{v:.1%}' for v in sz['band_shares'])}.",
+    ]
+    if sz["notes"]:
+        lines += ["", "> **Tile sizing.** " + " ".join(sz["notes"])]
+    lines += [
         "",
         "## Level of detail",
         "",
