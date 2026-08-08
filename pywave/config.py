@@ -240,6 +240,14 @@ class NearshoreConfig:
     ``"blend"`` is the safe choice for a real coast and ``"snell"`` is right for
     a smooth synthetic one.
 
+    ``"rays"`` is the proper solution: :mod:`pywave.rays` integrates rays
+    through the celerity field and measures the energy that arrives, so ``Kr``
+    stops being assumed. It never reads ``shore_normal``, which is what removes
+    the seams -- 0.0123 against ``snell``'s 0.375 -- while keeping the headland
+    focusing that ``blend`` throws away. It is **not the default**: it needs a
+    scene-level solve (seconds to minutes, cached), and on a smooth synthetic
+    beach ``snell`` is exact and free, so ``rays`` there is equal and slower.
+
     ``true``/``false`` are still accepted and mean ``"snell"``/``"none"``.
     """
     shoaling: bool = True
@@ -318,7 +326,7 @@ class Config:
         }
 
 
-REFRACTION_MODES = ("snell", "blend", "none")
+REFRACTION_MODES = ("snell", "blend", "none", "rays")
 
 
 def _refraction_mode(raw) -> str:

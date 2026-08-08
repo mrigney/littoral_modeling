@@ -910,11 +910,20 @@ def test_refraction_mode_is_configurable_and_reaches_the_mesh(record, cfg):
     region = (400.0, 380.0, 460.0, 402.0)
 
     heights = {}
-    for mode in pc.REFRACTION_MODES:
+    # "rays" needs a scene-level solve, so it is exercised in test_rays.py
+    # rather than here; this test is about the config key reaching the mesh.
+    for mode in [m for m in pc.REFRACTION_MODES if m != "rays"]:
         c = dataclasses.replace(
             cfg, nearshore=dataclasses.replace(cfg.nearshore, refraction=mode))
         m = pw_mesh.build_water_mesh(ts, bathy, c, t=0.0, dx=0.5, region=region)
         heights[mode] = m.vertices[:, 2].copy()
+
+    # ... but the refusal is part of the contract and is checked here, because
+    # this is where a caller would first hit it.
+    c_rays = dataclasses.replace(
+        cfg, nearshore=dataclasses.replace(cfg.nearshore, refraction="rays"))
+    with pytest.raises(ValueError, match="needs a ray_field"):
+        pw_mesh.build_water_mesh(ts, bathy, c_rays, t=0.0, dx=0.5, region=region)
 
     # blend and none must agree on amplitude -- blend sets Kr = 1 -- while snell
     # must differ, otherwise the switch is not connected to anything.

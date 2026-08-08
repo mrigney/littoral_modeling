@@ -1,16 +1,15 @@
 # Phase 5b — refraction on a complex coastline
 
-**Status: the solver is built and gated; it is not wired into production.**
-`pywave/rays.py` passes every gate except 5b.7, and `nearshore.transform` still
-has no `"rays"` mode — so 5b.6, the one that motivated the phase, is still a
-strict xfail against the old code. Section 5b below has the per-gate detail.
+**Status: built, gated, and selectable as `nearshore.refraction: rays`. Not the
+default.** `pywave/rays.py` passes every gate except 5b.7, including 5b.6 — the
+one that motivated the phase, which was a strict xfail until the wiring landed
+and is now a passing test measuring **exactly 0** where `snell` measures 0.448 m.
 
-What remains before it can be wired in is one thing, not several: **the gain and
-direction fields are single-frequency.** `transform` applies shoaling and
-refraction per spectral band, and `RayField.solve` takes one `omega`. Closing
-that means one solve per tile frequency, and it is the same job as teaching
-`transform` the `"rays"` mode. The per-band wind sea
-(`wind_sea_floor(bands=...)`) is already built and waiting for it.
+It is not the default because that is a judgement about rendered output, not
+about the gates: selecting it changes the wave height in almost every sheltered
+cell, and everything downstream — breaking, foam, wetness, swash — follows. On a
+smooth synthetic beach `snell` is exact and free, so `rays` there is equal and
+slower. Section 5b below has the per-gate detail.
 
 A design for replacing the per-cell refraction approximation with something that
 survives a real shoreline, plus the gate that would say it works.
@@ -225,7 +224,7 @@ is untouched until the gates pass.
 | 5b.3 no annihilation | **PASS** | 0.0896 on the full export, 0.1164 on the crop, against 0.05 |
 | 5b.4 focusing survives | **PASS** | headland/bay 1.34 at 2–5 m depth, against 1.2 |
 | 5b.5 energy conservation | **PASS** | 0.024% flux drift across a focusing shoal, against 5% |
-| 5b.6 independent of `shore_normal` | pinned as a strict xfail | 0.0246 m today, must be 0 |
+| 5b.6 independent of `shore_normal` | **PASS** | **exactly 0**, against 0.448 m for `snell` on the same bed |
 | 5b.7 mild-slope agreement | not started | — |
 | 5b.8 reproducibility | **PASS** | bitwise, on a repeat solve |
 | 5b.9 cost | recorded | 14 s for the crop at `decimate=32`, 77 s for the full export at `decimate=4` |
@@ -443,13 +442,55 @@ almost everywhere and still leaving the ray solution alone where it matters.
 
 ---
 
-## 6. Suggested order
+## 6. Order, as planned and as it went
 
-1. Gate 5b.6 as a failing test against today's code — pins the bug.
-2. `rays.py` with a straight beach only; pass 5b.1.
-3. Real bathymetry; pass 5b.2, 5b.3.
-4. Caching and `run_scene` integration; 5b.8, 5b.9.
-5. Focusing and energy checks; 5b.4, 5b.5.
-6. Mild-slope reference on a small domain; 5b.7.
+1. ~~Gate 5b.6 as a failing test against today's code — pins the bug.~~ **done**
+2. ~~`rays.py` with a straight beach only; pass 5b.1.~~ **done**
+3. ~~Real bathymetry; pass 5b.2, 5b.3.~~ **done**
+4. ~~Caching~~ **done**; `run_scene` integration outstanding.
+5. ~~Focusing and energy checks; 5b.4, 5b.5.~~ **done**
+6. Mild-slope reference on a small domain; 5b.7. **not started**
 
-Steps 1–4 give a usable, seam-free result. 5–6 are what make it defensible.
+Three things had to be built that this list did not anticipate, and each was
+forced by a measurement rather than foreseen:
+
+- **A direction field.** The list is all about height, and `RayField` originally
+  carried only gain — but `transform` rotates each tile by the local wave
+  direction, and 5b.5's flux needs a direction to be a flux *of*. Validated
+  against Snell's angle to 0.017°.
+- **The wind-sea floor.** 5b.3 was not reachable by more rays, because the
+  missing energy was never energy the rays could carry.
+- **Per-band everything.** `transform` works per band and the solver did not.
+  This was the last thing standing between the gates passing and the mode being
+  selectable, and it is why 5b.6 stayed an xfail for so long after the physics
+  was right.
+
+### What is left
+
+| | |
+|---|---|
+| `run_scene` integration | solve once per scene, cache, report timing |
+| Deciding the default | needs the measurements below in front of a human |
+| 5b.7 | a mild-slope reference solver on a small domain |
+
+The default is deliberately not being changed as part of the wiring. Selecting
+`rays` moves the wave height in almost every sheltered cell, and breaking, foam,
+wetness and swash all read that height. Measured on the straits crop, at the
+same sample points:
+
+| mode | min Hs | median | max | cells at exactly 0 | breaking |
+|---|---|---|---|---|---|
+| `snell` | **0.00000** | 0.6544 | 0.7007 | **0.066%** | 11.65% |
+| `blend` | 0.0754 | 0.6699 | 0.7009 | 0 | 13.61% |
+| `rays` | 0.0635 | 0.7086 | **0.7754** | 0 | 10.19% |
+
+`Hs_deep` is 0.7118 m, so `rays` is the only mode whose maximum exceeds deep
+water — that is the headland focusing, and `blend` cannot produce it at any
+setting because it pins `Kr = 1`. Per-frame cost is 2.5 s against `blend`'s 2.3
+and `snell`'s 4.1: sampling a precomputed field is cheaper than solving
+dispersion per band, so the wiring makes frames *faster*, not slower.
+
+What those numbers do not yet show is the interaction with foam. `coastal_bay`
+already saturates at coverage 1.0 across its surf band, and more energy in
+sheltered water can only push that further in. That should be measured before
+the default moves, not after.

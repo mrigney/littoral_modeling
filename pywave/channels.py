@@ -104,12 +104,32 @@ def submesh_mss(cfg, dx: float, depth=None):
     return np.where(d >= d_conv, deep, out)
 
 
-def _local_wave_direction(cfg, bathy, x, y, depth, refraction: str):
-    """Unit vector along the local wave heading, refracted where it matters."""
+def _local_wave_direction(cfg, bathy, x, y, depth, refraction: str,
+                          ray_field=None, band: int = 0):
+    """Unit vector along the local wave heading, refracted where it matters.
+
+    This is computed here rather than read off the ``NearshoreField`` because
+    the transform rotates each band separately and the channel wants one
+    direction. It must nonetheless agree with what the geometry was rotated by:
+    a mesh displaced along the ray direction while its ``wdir`` channel points
+    along the Snell direction would light incorrectly, and nothing about the
+    geometry would look wrong.
+    """
     from . import nearshore
 
     theta_deep = cfg.wind.direction_rad
-    if refraction == "none":
+    if refraction == "rays":
+        if ray_field is None:
+            raise ValueError("refraction='rays' needs a ray_field= here too; "
+                             "without it this channel would silently carry the "
+                             "Snell direction while the geometry carries the "
+                             "ray one")
+        # One direction for the channel, taken from the band carrying the most
+        # energy -- the same reduction the other branches make by evaluating at
+        # `f_p`. The caller picks it, because which band dominates is a property
+        # of the tile sizing rather than of position in the list.
+        _, theta = ray_field[band].sample(bathy, x, y)
+    elif refraction == "none":
         theta = np.full(np.shape(depth), theta_deep, dtype=np.float64)
     else:
         _, _, normal = bathy.sample(x, y)
@@ -123,7 +143,8 @@ def _local_wave_direction(cfg, bathy, x, y, depth, refraction: str):
 
 
 def vertex_channels(tileset, bathy, cfg, x, y, nf, dx: float, *,
-                    foam=None, foam_bathy=None, refraction: str = "snell") -> dict:
+                    foam=None, foam_bathy=None, refraction: str = "snell",
+                    ray_field=None) -> dict:
     """Build the per-vertex channel set for a mesh at spacing ``dx``.
 
     ``nf`` is the :class:`~pywave.nearshore.NearshoreField` already evaluated at
@@ -144,7 +165,16 @@ def vertex_channels(tileset, bathy, cfg, x, y, nf, dx: float, *,
                                 gamma=cfg.spectrum.gamma)
     aniso = float(cross / up) if up > 0 else 1.0
 
-    wdir_x, wdir_y = _local_wave_direction(cfg, bathy, x, y, nf.depth, refraction)
+    dominant = int(np.argmax([t.m0() for t in tileset.tiles])) if tileset.tiles else 0
+    if ray_field is not None:
+        # The field may have been trimmed to a band-limited tile set, which
+        # drops bands off the top. Clamping rather than raising: the dominant
+        # band is the one carrying most of the variance, so it is never the one
+        # band limiting removes, and if that ever changed the direction would
+        # still come from the nearest band that survived.
+        dominant = min(dominant, len(ray_field) - 1)
+    wdir_x, wdir_y = _local_wave_direction(cfg, bathy, x, y, nf.depth, refraction,
+                                           ray_field=ray_field, band=dominant)
 
     channels = {
         "mss": np.asarray(mss, dtype=np.float32),

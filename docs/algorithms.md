@@ -910,27 +910,48 @@ the bed.
 
 ### Choosing a mode
 
-`nearshore.refraction` selects `snell`, `blend` or `none` (`true`/`false` still
-parse, as `snell`/`none`). `transform` and `build_water_mesh` default to
+`nearshore.refraction` selects `snell`, `blend`, `none` or `rays` (`true`/`false`
+still parse, as `snell`/`none`). `transform` and `build_water_mesh` default to
 whatever the scene asked for.
 
 | Coast | Mode | Why |
 |---|---|---|
-| Synthetic, smooth | `snell` | The straight-contour premise holds |
-| Real, complex | `blend` | Turns the waves, leaves height alone (`Kr = 1`) |
+| Synthetic, smooth | `snell` | The straight-contour premise holds, exactly and for free |
+| Real, complex | `rays` | Seam-free *and* keeps focusing; needs a scene-level solve |
+| Real, complex, no solve budget | `blend` | Turns the waves, leaves height alone (`Kr = 1`) |
+
+Measured on the straits crop at the same sample points, with `Hs_deep = 0.7118 m`:
+
+| mode | min `Hs` | median | max | cells at exactly 0 | per frame |
+|---|---|---|---|---|---|
+| `snell` | **0.00000** | 0.6544 | 0.7007 | **0.066%** | 4.1 s |
+| `blend` | 0.0754 | 0.6699 | 0.7009 | 0 | 2.3 s |
+| `rays` | 0.0635 | 0.7086 | **0.7754** | 0 | 2.5 s |
+
+`rays` is the only mode whose maximum exceeds deep water, which is the headland
+focusing; `blend` cannot produce it at any setting because it pins `Kr = 1`. And
+the per-frame cost *falls* relative to `snell`, because sampling a precomputed
+field is cheaper than solving dispersion per band — the solve is a one-off scene
+cost, cached, in the same place the foam spin-up already sits.
+
+**`rays` is not the default.** That is a decision about rendered output rather
+than about correctness: it moves the wave height in almost every sheltered cell,
+and §12 breaking, §13 wetness and §14 foam all read that height.
 
 `blend` is a **workaround, not a fix**: it buys a seam-free scene by discarding
 headland focusing, which is real physics.
 
 The replacement — ray integration with a wave-action balance — is designed in
-[phase5b_refraction.md](phase5b_refraction.md) and **is now built and gated in
-`pywave/rays.py`, but is not wired into `transform`**, so it is not what any
-scene currently renders and the mode table above still stands. It measures
-0.0123 for the p99.9 jump that `snell` scores 0.375 on, while keeping the
-headland focusing that `blend` throws away (1.34 headland/bay against a 1.2
-criterion). What remains before it can be selected here is that `transform`
-applies refraction per spectral band and `RayField` solves one frequency; see
-§17 R5.
+[phase5b_refraction.md](phase5b_refraction.md), built in `pywave/rays.py`, and
+**selectable as `refraction: rays`**. It scores 0.0123 on the p99.9 jump that
+`snell` scores 0.375 on, while keeping the headland focusing `blend` throws away
+(1.34 headland/bay against a 1.2 criterion).
+
+The property that makes it work is not a better `Kr`, it is the absence of one.
+Celerity is a function of depth alone, depth is continuous wherever the bed is,
+so the ray paths are continuous. `shore_normal` is never read on that path —
+rotate every shore normal by 30° and the answer changes by **exactly zero**,
+against 0.448 m for `snell` on the same bed.
 
 ### The blend alternative, and when it is used
 
@@ -1450,12 +1471,12 @@ Everything the model does *not* do exactly, in one place.
 | 9 | Foam spin-up truncates history at 0.5% | Bounded and stated | Nothing; the residual is a declared number |
 | 10 | Tile bands reduce each to one representative frequency | Band-count error on `Hs` is 0.95% at three bands, 0.18% at twelve | Only if the first band edge is far above `k_p`, when it becomes total — see §8 |
 
-### Not yet in force: the ray solver
+### In force only under `refraction: rays`
 
-`pywave/rays.py` is built and gated but **not wired into `transform`**, so none
-of the following is in any rendered scene yet. They are listed here so the table
-is complete the day it is, and because two of them are approximations the
-production path does not currently have to make.
+`pywave/rays.py` is built, gated and selectable, but is **not the default**, so
+none of the following applies to a scene that has not asked for it. They are
+approximations the Snell path does not have to make, which is the honest other
+side of the seams it removes.
 
 | # | Approximation | Why acceptable | Where it would bite |
 |---|---|---|---|
@@ -1463,13 +1484,14 @@ production path does not currently have to make.
 | R2 | Sheltered water floored by a locally generated short-fetch sea | A sheltered bay is not calm, and 0 is further from the truth than this is; takes min gain from 0.000 to 0.0896 on the straits export | Anywhere the shelter fetch is not the real fetch — a bay open to a second wind direction |
 | R3 | Deposition smoothed with a σ = 80 m kernel | Monte Carlo shot noise; the principled fix is more rays, and this is what the gate needs | It is 5.9 `λ_p`, well past what "a ray is a wave packet" justifies. Structure finer than that is not resolved |
 | R4 | Solved on a decimated grid and interpolated up | The gain varies on the bathymetry's length scale, not the mesh's | Bathymetry with real structure below the solve spacing |
-| R5 | One representative frequency for the whole spectrum | — | **Unresolved.** `transform` works per band and `RayField` is single-frequency; this is what must close before wiring |
+| R5 | One representative frequency **per band** — three, not one | Same reduction §10 already makes for `Ks`; band-count error on `Hs` is 0.95% | A sea whose spectrum is wide compared with the band structure — see §8 |
 
-R5 is the open one. The per-band wind sea (`wind_sea_floor(bands=...)`) is
-already built against it — a short fetch moves the peak up rather than scaling
-the spectrum down, so a sheltered bay is short chop with no swell in it, and a
-single number for the floor is 20× low in the short band and 5× high in the
-long one.
+R5 was the blocker and is closed: `BandedRayField` solves one field per tile
+frequency, and the wind sea is integrated over each band of the short-fetch
+spectrum rather than taken from the total. That matters because a short fetch
+moves the peak *up* rather than scaling the spectrum down — a sheltered bay is
+short chop with no swell in it, and a single number for the floor is 20× low in
+the short band and 5× high in the long one.
 
 ### Deviations from the cookbook
 

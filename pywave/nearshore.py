@@ -419,6 +419,7 @@ def transform(
     order: int = 3,
     refraction: str | None = None,
     depth_limit: bool = True,
+    ray_field=None,
 ) -> NearshoreField:
     """Apply the nearshore transformation to a composite surface.
 
@@ -442,10 +443,27 @@ def transform(
     Parameters
     ----------
     refraction : ``"snell"`` (default), ``"blend"`` (the cookbook's
-        depth-weighted slerp) or ``"none"``.
+        depth-weighted slerp), ``"none"``, or ``"rays"``.
     depth_limit : cap the local height at ``gamma_b * depth``. Turning this off
         is only useful for testing the raw shoaling gain, which diverges at the
         waterline.
+    ray_field : a :class:`pywave.rays.BandedRayField`, required by
+        ``refraction="rays"`` and ignored otherwise. Passed in rather than
+        solved here on purpose: the solve is seconds to minutes and this
+        function is called many times per scene, so the caller owns it and the
+        caching. Omitting it raises rather than silently solving one per call.
+
+    Notes on ``"rays"``
+    -------------------
+    The ray field supplies **both** halves of the transformation, replacing
+    ``Ks * Kr`` with a measured gain and the Snell angle with a measured mean
+    direction. Nothing on this path reads ``shore_normal``, which is the whole
+    point -- see :mod:`pywave.rays`.
+
+    Two things it does *not* change. Depth limiting still runs afterwards and is
+    still shared across bands, so the surf zone saturates the same way; and the
+    tiles are still sampled and rotated identically. The wave field being
+    transformed is the same wave field.
     """
     x = np.asarray(x, dtype=np.float64)
     y = np.asarray(y, dtype=np.float64)
@@ -462,13 +480,38 @@ def transform(
     omegas = tile_frequencies(tileset)
     d_ref = 3.0 * cfg.lambda_p
 
+    if refraction == "rays":
+        if ray_field is None:
+            raise ValueError(
+                "refraction='rays' needs a ray_field=. Solve one per scene with "
+                "rays.BandedRayField.solve(bathy, cfg, tileset, cache_dir=...) "
+                "and pass it in; transform() is called many times per scene and "
+                "the solve is seconds to minutes, so it deliberately will not "
+                "quietly do it for you.")
+        if len(ray_field) != len(tileset.tiles):
+            raise ValueError(
+                f"ray_field has {len(ray_field)} bands for {len(tileset.tiles)} "
+                f"tiles -- it was solved against a different tile set")
+
     weights, rotations = [], []
     variance = np.zeros_like(depth)
 
-    for tile, omega in zip(tileset.tiles, omegas):
+    for i, (tile, omega) in enumerate(zip(tileset.tiles, omegas)):
         if omega <= 0.0:
             weights.append(np.zeros_like(depth))
             rotations.append(np.zeros_like(depth))
+            continue
+
+        if refraction == "rays":
+            # The ray field carries shoaling and refraction together -- it
+            # measured the energy that arrived, which is Ks and Kr at once --
+            # so there is no separate `ks` to multiply here. Multiplying by one
+            # would apply shoaling twice.
+            gain, theta = ray_field[i].sample(bathy, x, y)
+            gain = np.where(depth > 0.0, gain, 0.0)
+            weights.append(gain)
+            rotations.append(_wrap(theta - theta_deep))
+            variance = variance + gain**2 * tile.m0()
             continue
 
         ks = shoaling_coefficient(omega, depth)
@@ -485,7 +528,7 @@ def transform(
             kr = np.ones_like(depth)
         else:
             raise ValueError(f"unknown refraction mode {refraction!r}; "
-                             f"use 'snell', 'blend' or 'none'")
+                             f"use 'snell', 'blend', 'none' or 'rays'")
 
         gain = np.where(depth > 0.0, ks * kr, 0.0)
         weights.append(gain)

@@ -203,6 +203,7 @@ def build_water_mesh(
     trim_depth: float = 0.02,
     margin: float | None = None,
     refraction: str | None = None,
+    ray_field=None,
     band_limit: bool = True,
     foam: np.ndarray | None = None,
     foam_bathy: Bathymetry | None = None,
@@ -219,9 +220,13 @@ def build_water_mesh(
     trim_depth : cut the mesh at this depth rather than at zero [m].
     margin : landward dilation past the waterline [m]. Defaults to the swash
         excursion, so the swash band has geometry to live on.
-    refraction : ``"snell"``, ``"blend"`` or ``"none"``. ``None`` (the default)
-        takes it from ``cfg.nearshore.refraction``, which is what a scene file
-        expects to control.
+    refraction : ``"snell"``, ``"blend"``, ``"none"`` or ``"rays"``. ``None``
+        (the default) takes it from ``cfg.nearshore.refraction``, which is what
+        a scene file expects to control.
+    ray_field : a :class:`pywave.rays.BandedRayField`, required by
+        ``refraction="rays"``. Trimmed to the band-limited tile set here, since
+        ``band_limit`` can drop tiles the field was solved for -- see
+        :meth:`~pywave.rays.BandedRayField.matching`.
     band_limit : drop spectral content above the mesh Nyquist ``pi/dx`` before
         sampling, so it cannot alias into the geometry. On by default; that
         variance reaches the renderer through the ``mss`` channel instead.
@@ -290,8 +295,16 @@ def build_water_mesh(
     # puts it in both places at once.
     surf_tiles = tileset.band_limited(np.pi / dx) if band_limit else tileset
 
+    # Resolve the mode before it is used *and* before it is recorded. Storing
+    # the parameter as passed put `refraction: null` in the metadata of every
+    # mesh built from a scene config, so a mesh could not be asked what was
+    # actually applied to it -- which is the entire job of that field.
+    if refraction is None:
+        refraction = getattr(cfg.nearshore, "refraction", "snell")
+
+    rf = ray_field.matching(surf_tiles) if ray_field is not None else None
     nf = nearshore.transform(surf_tiles, bathy, cfg, vx, vy, t,
-                             refraction=refraction)
+                             refraction=refraction, ray_field=rf)
     s = nf.surface
     chop = cfg.surface.choppiness
 
@@ -308,7 +321,7 @@ def build_water_mesh(
 
     channels = vertex_channels(tileset, bathy, cfg, vx, vy, nf, dx,
                                foam=foam, foam_bathy=foam_bathy,
-                               refraction=refraction)
+                               refraction=refraction, ray_field=rf)
 
     meta = {
         "t": float(t),

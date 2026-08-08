@@ -70,7 +70,8 @@ import numpy as np
 from .constants import G
 
 __all__ = ["celerity_fields", "launch_line", "trace_rays", "shelter_fetch",
-           "band_fetch_response", "wind_sea_floor", "RayField", "CACHE_VERSION"]
+           "band_fetch_response", "wind_sea_floor", "RayField",
+           "BandedRayField", "CACHE_VERSION"]
 
 
 CACHE_VERSION = 1
@@ -633,7 +634,8 @@ class RayField:
               ds_frac: float = 0.5, break_depth: float = 0.05,
               min_hits: float = 1.0, decimate: int = 1,
               smooth_m: float | None = None,
-              wind_sea: bool = True) -> "RayField":
+              wind_sea: bool = True,
+              band: tuple[float, float] | None = None) -> "RayField":
         """Integrate a directional wave field across the bathymetry.
 
         A single beam would give hard geometric shadows behind every headland --
@@ -668,6 +670,14 @@ class RayField:
         and it is on by default because leaving it off does not give a
         conservative answer -- it gives a sheltered bay a wave height of exactly
         zero, which is further from the truth than any approximation in it.
+
+        ``band`` is the ``(k_lo, k_hi)`` this solve represents, in rad/m. It
+        changes only the wind sea, which is then integrated over that band of
+        the short-fetch spectrum rather than taken from the closed-form total --
+        the difference between a sheltered bay made of chop and one made of
+        scaled-down swell. The rays themselves already carry the band through
+        ``omega``. Leave it ``None`` for a single-frequency solve over the whole
+        spectrum, which is what the standalone gates measure.
         """
         from scipy.ndimage import distance_transform_edt, gaussian_filter, zoom
 
@@ -758,9 +768,14 @@ class RayField:
         # anything the rays measured.
         floor_e = 0.0
         if wind_sea:
+            extra = ({} if band is None
+                     else dict(bands=[band], u10=cfg.wind.speed,
+                               gamma=cfg.spectrum.gamma))
             floor_e = wind_sea_floor(depth, dx, th_w + rel, w,
                                      cfg.wind.fetch, origin=(x0g, y0g),
-                                     max_fetch=cfg.wind.fetch)
+                                     max_fetch=cfg.wind.fetch, **extra)
+            if band is not None:
+                floor_e = floor_e[0]
             # Smoothed with the same kernel as the ray energy, and for a reason
             # that is not the same one. The ray field is smoothed because it is
             # Monte Carlo; this is smoothed because `shelter_fetch` asks a
@@ -951,3 +966,106 @@ class RayField:
         u = _bilinear(np.cos(self.theta), gx, gy)
         v = _bilinear(np.sin(self.theta), gx, gy)
         return _bilinear(self.gain, gx, gy), np.arctan2(v, u)
+
+
+@dataclass
+class BandedRayField:
+    """One :class:`RayField` per spectral band, which is what production needs.
+
+    ``nearshore.transform`` applies shoaling and refraction **per band** -- that
+    is the entire reason the tiles carry disjoint bands rather than merely
+    different sizes -- while :meth:`RayField.solve` takes one ``omega``. A
+    single-frequency field is enough to gate the solver against Snell and
+    against the straits export, and not enough to replace the production path.
+    This closes that gap.
+
+    Refraction is dispersive, and the spread is not subtle: at 3 m depth on the
+    resized `straits_crop` bands, the long band has shoaled to ``Ks = 0.925``
+    while the short band is still at 1.000 and has not felt the bottom at all.
+
+    Each band is cached under its own key, so changing one tile's geometry
+    re-solves that band alone.
+    """
+
+    bands: tuple[RayField, ...]
+    band_edges: tuple[tuple[float, float], ...]
+    """``(k_lo, k_hi)`` per band [rad/m], matching ``tiling.band_edges``."""
+    meta: dict = field(default_factory=dict)
+
+    def __len__(self) -> int:
+        return len(self.bands)
+
+    def __getitem__(self, i) -> RayField:
+        return self.bands[i]
+
+    @classmethod
+    def solve(cls, bathy, cfg, tileset, *, cache_dir=None, **solve_kwargs):
+        """Solve every band of ``tileset``, caching each independently.
+
+        The representative frequency of each band is
+        :func:`nearshore.tile_frequencies` -- its energy centroid -- which is
+        exactly what ``transform`` already uses for that band's ``Ks``. Taking
+        it from anywhere else would give the two a different idea of what the
+        band is.
+        """
+        from .nearshore import tile_frequencies
+        from .tiling import band_edges as _band_edges
+
+        edges = _band_edges(cfg.surface.tiles)
+        omegas = tile_frequencies(tileset)
+        if len(edges) != len(tileset.tiles):
+            raise ValueError(
+                f"{len(edges)} band edges for {len(tileset.tiles)} tiles; the "
+                f"tile set was built from a different config than this one")
+
+        fields, solved = [], 0
+        for om, edge in zip(omegas, edges):
+            rf = RayField.cached(bathy, cfg, float(om), cache_dir=cache_dir,
+                                 band=(float(edge[0]), float(edge[1])),
+                                 **solve_kwargs)
+            solved += rf.meta.get("cache") != "hit"
+            fields.append(rf)
+
+        return cls(bands=tuple(fields),
+                   band_edges=tuple((float(a), float(b)) for a, b in edges),
+                   meta={"n_bands": len(fields),
+                         "omegas": [float(o) for o in omegas],
+                         "periods_s": [float(2 * np.pi / o) for o in omegas],
+                         "solved": int(solved),
+                         "from_cache": len(fields) - int(solved)})
+
+    def matching(self, tileset) -> "BandedRayField":
+        """The subset of these bands that lines up with ``tileset``'s tiles.
+
+        Exists for one caller: :func:`mesh.build_water_mesh` band-limits the
+        tiles at the mesh Nyquist before sampling, which can leave fewer tiles
+        than the field was solved for. ``band_limited`` truncates from the
+        **top** -- it removes high-``k`` content -- so the surviving tiles are a
+        prefix and index alignment holds.
+
+        The one inexactness is that the new top band is truncated, so its energy
+        centroid is slightly lower than the frequency its ray field was solved
+        at. That is immaterial by construction: the content being removed is the
+        shortest waves in the set, which do not feel the bottom until the last
+        few centimetres of depth and whose gain is therefore ~1 across almost
+        the whole domain. Trimming a band whose answer is 1 does not change the
+        frequency at which 1 is the answer.
+
+        Done explicitly rather than by letting ``transform`` quietly use the
+        first *n* bands, because every other mismatch it could hide -- a field
+        solved against a different config, a stale cache -- is a real bug.
+        """
+        n = len(tileset.tiles)
+        if n > len(self.bands):
+            raise ValueError(
+                f"tile set has {n} tiles but this field has only "
+                f"{len(self.bands)} bands; it was solved against a different "
+                f"config")
+        if n == len(self.bands):
+            return self
+        return BandedRayField(bands=self.bands[:n], band_edges=self.band_edges[:n],
+                              meta=dict(self.meta, truncated_from=len(self.bands)))
+
+    def sample(self, bathy, x, y):
+        """``[(gain, theta), ...]``, one pair per band, at scene coordinates."""
+        return [rf.sample(bathy, x, y) for rf in self.bands]

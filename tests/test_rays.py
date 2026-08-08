@@ -1,8 +1,22 @@
 """PHASE 5b -- Gate 5b: refraction that survives a complex coastline.
 
-The design is in docs/phase5b_refraction.md. This file is written ahead of the
-implementation: 5b.6 pins the defect that motivates the whole phase, and the
-rest fill in as `pywave/rays.py` grows.
+The design is in docs/phase5b_refraction.md. Every gate passes here except 5b.7,
+which needs a mild-slope reference solver that is not built.
+
+This file was originally written ahead of the implementation, with 5b.6 as a
+strict xfail pinning the defect the phase exists to fix. That xfail is gone:
+5b.6 now passes on the ray path, measuring exactly 0 where `snell` measures
+0.448 m on the same bed. The Snell defect is still asserted, positively, so it
+cannot quietly change while nobody is looking.
+
+Three groups of checks, roughly in the order the work happened:
+
+* the solver against closed forms -- 5b.1 height, 5b.1c direction, on the one
+  geometry where Snell is exactly right;
+* the solver on bathymetry with no closed form -- 5b.2 continuity, 5b.3
+  annihilation, 5b.4 focusing, 5b.5 energy, 5b.8 reproducibility;
+* the plumbing -- caching, per-band solves, and the two places the ray answer
+  has to reach: the mesh geometry and the `wdir` channel that lights it.
 """
 
 from __future__ import annotations
@@ -33,48 +47,76 @@ def _rotate(normal: np.ndarray, degrees: float) -> np.ndarray:
                      sa * normal[0] + ca * normal[1]])
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Gate 5b.6: the defect Phase 5b exists to fix. Snell's Kr is computed "
-           "from shore_normal -- the direction to the nearest shore -- which is "
-           "discontinuous on the medial axis of any distance-derived bed. Until "
-           "rays.py lands, perturbing that direction moves the answer. Strict, so "
-           "this fails loudly the moment it starts passing.")
-def test_5b6_wave_field_is_independent_of_shore_normal(record, cfg):
-    """The answer must not depend on which shore happens to be nearest.
-
-    `shore_normal` is a property of the *shoreline geometry*, not of the wave
-    field. Waves refract in response to the depth they are travelling over. A
-    solver that is doing refraction properly cannot notice if that vector is
-    rotated, because it should never have read it.
-
-    Rotating by 30 degrees is a fair test: it is far larger than any numerical
-    tolerance and far smaller than the 180 degrees the field genuinely jumps by
-    on the medial axis.
-    """
-    from pywave import tiling
-
-    ts = tiling.TileSet.build(cfg)
-    bathy = Bathymetry.from_config(cfg, fine=True)
+def _dhs_under_rotation(cfg, ts, bathy, mode, ray_field=None):
+    """Largest change in local Hs when every shore normal is turned 30 degrees."""
     ax, ay = bathy.meta.axes()
     X, Y = np.meshgrid(ax, ay, indexing="xy")
     x, y = X.ravel(), Y.ravel()
-
     turned = dataclasses.replace(
         bathy, shore_normal=_rotate(bathy.shore_normal, 30.0))
 
-    base = nearshore.transform(ts, bathy, cfg, x, y, 0.0, refraction="snell")
-    other = nearshore.transform(ts, turned, cfg, x, y, 0.0, refraction="snell")
-
+    base = nearshore.transform(ts, bathy, cfg, x, y, 0.0, refraction=mode,
+                               ray_field=ray_field)
+    other = nearshore.transform(ts, turned, cfg, x, y, 0.0, refraction=mode,
+                                ray_field=ray_field)
     wet = np.asarray(base.depth) > 0.0
-    d = float(np.abs(np.asarray(base.hs_local)[wet]
-                     - np.asarray(other.hs_local)[wet]).max())
-    record("5b", "max |dHs| under a 30 deg shore_normal rotation", d, unit="m",
-           tol=1e-12,
-           note="Refraction must respond to depth, not to the direction of the "
-                "nearest shore. Non-zero here is the medial-axis seam.",
+    return float(np.abs(np.asarray(base.hs_local)[wet]
+                        - np.asarray(other.hs_local)[wet]).max())
+
+
+@pytest.mark.slow
+def test_5b6_the_ray_path_is_independent_of_shore_normal(record):
+    """Gate 5b.6 -- the check the whole phase exists to pass.
+
+    `shore_normal` is a property of the *shoreline geometry*, not of the wave
+    field. Waves refract in response to the depth they travel over. A solver
+    doing refraction properly cannot notice that vector being rotated, because
+    it should never have read it.
+
+    Rotating by 30 degrees is a fair test: far larger than any numerical
+    tolerance, and far smaller than the 180 degrees the field genuinely jumps by
+    on the medial axis of a distance-derived bed.
+
+    The rays reach zero rather than merely small, and that is the point. This is
+    not a tolerance that was met; it is a quantity that is structurally absent
+    from the computation. Celerity is a function of depth alone.
+    """
+    from pywave import rays
+
+    bathy, cfg, ts = _banded_scene()
+    brf = rays.BandedRayField.solve(bathy, cfg, ts, n_dirs=7, rays_per_dir=200,
+                                    smooth_m=40.0)
+    d = _dhs_under_rotation(cfg, ts, bathy, "rays", ray_field=brf)
+    record("5b", "max |dHs| under a 30 deg shore_normal rotation, rays", d,
+           reference=0.0, tol=1e-12, unit="m",
+           note="Exactly zero, not small: nothing on the ray path reads "
+                "shore_normal, so the rotation cannot reach the answer at all.",
            passed=d < 1e-12)
-    assert d < 1e-12
+    assert d == 0.0
+
+
+@pytest.mark.slow
+def test_5b6_reference_the_snell_path_still_is_not(record):
+    """The defect, asserted rather than assumed, so it cannot quietly change.
+
+    This was a strict xfail while `rays` was being built. Now that the gate
+    passes on the ray path, the useful thing is the opposite assertion: `snell`
+    **does** depend on the direction to the nearest shore, by a measurable
+    amount, and that is why `rays` exists.
+
+    Kept as a positive check rather than deleted. If someone changes the Snell
+    path and this number moves, that is worth knowing; and it keeps the
+    comparison in the validation report next to the ray result.
+    """
+    bathy, cfg, ts = _banded_scene()
+    d = _dhs_under_rotation(cfg, ts, bathy, "snell")
+    record("5b", "max |dHs| under a 30 deg shore_normal rotation, snell", d,
+           tol=None, unit="m",
+           note="Non-zero by construction: Kr is computed from the direction to "
+                "the nearest shore, which is discontinuous on the medial axis. "
+                "Compare the rays row, which is exactly 0.",
+           passed=d > 1e-9)
+    assert d > 1e-9, "snell should still show the defect rays was built to fix"
 
 
 # ---------------------------------------------------------------------------
@@ -692,6 +734,190 @@ def test_a_sheltered_bay_is_chop_not_scaled_down_swell(record):
            passed=b3 > b1)
     assert b3 > b2 > b1, "energy must move UP the bands as fetch shortens"
     assert over_one > 1.0, "a short-fetch sea outstrips deep water at high k"
+
+
+# ---------------------------------------------------------------------------
+# Per band -- what production needs and a single-frequency solve cannot give
+# ---------------------------------------------------------------------------
+
+
+def _banded_scene():
+    """A small embayment plus a sea state whose bands are far enough apart.
+
+    `straits_crop`'s sea rather than the test lake's: the lake's bands sit at
+    0.99/0.63/0.43 s, all so short that none of them feels the bottom over a
+    scene this size, which would make every band identical and the test vacuous.
+    """
+    from pywave import load_config, tiling
+    from pywave.bathymetry import Bathymetry
+
+    cfg = load_config(REPO / "configs" / "straits_crop.yaml")
+    bathy = Bathymetry.dean_embayment(nx=64, ny=64, dx=16.0, shoreline_y=819.2,
+                                      amplitude=184.0, wavelength=512.0,
+                                      dean_a=0.3, max_depth=12.0)
+    return bathy, cfg, tiling.TileSet.build(cfg)
+
+
+def _nearshore_region(bathy, lo=0.2, hi=6.0):
+    """The rectangle covering water shallow enough for refraction to act.
+
+    Worth deriving rather than typing: this scene's depth caps at 12 m over most
+    of its area, and a region chosen by eye landed entirely in that flat part,
+    where every refraction mode agrees because none of them is doing anything.
+    A test comparing modes there compares nothing.
+    """
+    ax, ay = bathy.meta.axes()
+    ys, xs = np.where((bathy.depth > lo) & (bathy.depth < hi))
+    return (float(ax[xs.min()]), float(ay[ys.min()]),
+            float(ax[xs.max()]), float(ay[ys.max()]))
+
+
+@pytest.mark.slow
+def test_each_band_is_solved_at_its_own_frequency(record):
+    """Refraction is dispersive, so one field for the whole spectrum will not do.
+
+    `transform` applies shoaling and refraction per band -- the reason the tiles
+    carry disjoint bands rather than merely different sizes -- while
+    `RayField.solve` takes one omega. This is the check that the banded solve
+    actually varies with frequency instead of computing the same field three
+    times at three prices.
+
+    The representative frequency must be `nearshore.tile_frequencies`, the same
+    energy centroid `transform` uses for that band's `Ks`; taking it from
+    anywhere else would give the two a different idea of what the band is.
+    """
+    from pywave import rays
+    from pywave.nearshore import tile_frequencies
+    from pywave.tiling import band_edges
+
+    bathy, cfg, ts = _banded_scene()
+    brf = rays.BandedRayField.solve(bathy, cfg, ts, n_dirs=7, rays_per_dir=200,
+                                    smooth_m=40.0)
+
+    assert len(brf) == len(ts.tiles)
+    assert brf.band_edges == tuple(
+        (float(a), float(b)) for a, b in band_edges(cfg.surface.tiles))
+    want = tile_frequencies(ts)
+    got = np.array([rf.omega for rf in brf.bands])
+    assert np.allclose(got, want), "band frequencies must match transform's"
+
+    wet = bathy.depth > 0.0
+    spread = float(np.abs(brf[0].gain - brf[-1].gain)[wet].mean())
+    record("5b", "mean |gain| difference between longest and shortest band",
+           spread, tol=None, unit="",
+           note=f"periods {', '.join(f'{2 * np.pi / o:.2f}' for o in got)} s. "
+                f"Identical bands would read 0 and would mean the banded solve "
+                f"is paying {len(brf)}x for one answer.",
+           passed=spread > 0.005)
+    assert spread > 0.005, "bands are indistinguishable; the solve is not dispersive"
+
+
+@pytest.mark.slow
+def test_shelter_holds_up_the_short_band_most(record):
+    """A sheltered bay is chop, so the short band is the one that survives there.
+
+    The physical claim behind the per-band floor, measured end to end rather
+    than in the lookup table: a short fetch moves the peak up, so as the
+    shelter deepens it is the *long* waves that vanish first. Minimum gain must
+    therefore rise with band number.
+
+    A scalar floor cannot produce this ordering at all -- it scales every band
+    by one number, so all three minima would sit together and a sheltered bay
+    would render as small swell.
+    """
+    from pywave import rays
+
+    bathy, cfg, ts = _banded_scene()
+    brf = rays.BandedRayField.solve(bathy, cfg, ts, n_dirs=7, rays_per_dir=200,
+                                    smooth_m=40.0)
+    wet = bathy.depth > 0.0
+    mins = [float(rf.gain[wet].min()) for rf in brf.bands]
+
+    record("5b", "min gain, shortest band over longest", mins[-1] / mins[0],
+           tol=None, unit="",
+           note=f"per-band minima {', '.join(f'{m:.3f}' for m in mins)}. Rising "
+                f"with band number is the signature of a short-fetch sea: the "
+                f"long waves go first. A scalar floor would flatten these "
+                f"together.",
+           passed=mins[-1] > mins[0])
+    assert mins == sorted(mins), f"shelter must favour short waves, got {mins}"
+
+
+@pytest.mark.slow
+def test_rays_reach_the_mesh_through_band_limiting(record):
+    """The mesh path drops tiles above its Nyquist, which the field must survive.
+
+    `build_water_mesh` band-limits the tile set at `pi/dx` before sampling, so
+    it can hand `transform` fewer tiles than the ray field was solved for. That
+    is the one place index alignment between bands and tiles could silently
+    slip, and a mismatch would apply band 2's gain to band 3's waves -- a wrong
+    answer that still looks like water.
+    """
+    import dataclasses
+
+    from pywave import mesh as pw_mesh, rays
+
+    bathy, cfg, ts = _banded_scene()
+    brf = rays.BandedRayField.solve(bathy, cfg, ts, n_dirs=7, rays_per_dir=200,
+                                    smooth_m=40.0)
+    cfg_rays = dataclasses.replace(
+        cfg, nearshore=dataclasses.replace(cfg.nearshore, refraction="rays"))
+
+    region = _nearshore_region(bathy)
+    m = pw_mesh.build_water_mesh(ts, bathy, cfg_rays, t=0.0, dx=8.0,
+                                 region=region, ray_field=brf)
+
+    z = m.vertices[:, 2]
+    kept = len(ts.band_limited(np.pi / 4.0).tiles)
+    assert np.all(np.isfinite(z)), "ray path produced non-finite geometry"
+    assert m.meta["refraction"] == "rays", "mesh must record what was applied"
+    record("5b", "tiles surviving band limiting at the mesh Nyquist", kept,
+           reference=len(ts.tiles), tol=None, unit="",
+           note=f"{len(m.vertices)} vertices, elevation range "
+                f"{z.min() - cfg.scene.water_level:+.4f} to "
+                f"{z.max() - cfg.scene.water_level:+.4f} m about still water. "
+                f"The field carries {len(brf)} bands and is trimmed to the "
+                f"surviving prefix by BandedRayField.matching.",
+           passed=True)
+
+
+@pytest.mark.slow
+def test_the_wdir_channel_follows_the_mode_the_geometry_used(record):
+    """A mesh lit along one direction and displaced along another is silently wrong.
+
+    `wdir` is what the BSDF uses for anisotropic reflection. `vertex_channels`
+    computes it independently of `transform`, so before `"rays"` was taught to
+    it, selecting rays gave geometry displaced along the ray direction and a
+    channel pointing along the Snell direction. Nothing about the geometry would
+    have looked wrong -- the water would just have lit as though the waves ran
+    somewhere else.
+    """
+    import dataclasses
+
+    from pywave import mesh as pw_mesh, rays
+
+    bathy, cfg, ts = _banded_scene()
+    brf = rays.BandedRayField.solve(bathy, cfg, ts, n_dirs=7, rays_per_dir=200,
+                                    smooth_m=40.0)
+    region = _nearshore_region(bathy)
+
+    got = {}
+    for mode in ("snell", "rays"):
+        c = dataclasses.replace(
+            cfg, nearshore=dataclasses.replace(cfg.nearshore, refraction=mode))
+        m = pw_mesh.build_water_mesh(ts, bathy, c, t=0.0, dx=8.0, region=region,
+                                     ray_field=brf if mode == "rays" else None)
+        got[mode] = np.degrees(np.arctan2(m.channels["wdir_y"],
+                                          m.channels["wdir_x"]))
+
+    d = np.abs(np.angle(np.exp(1j * np.radians(got["rays"] - got["snell"]))))
+    worst = float(np.degrees(d).max())
+    record("5b", "wdir channel: rays against snell", worst, tol=None, unit="deg",
+           note=f"mean {np.degrees(d).mean():.2f} deg. Near zero would mean the "
+                f"channel is ignoring the refraction mode and still reporting "
+                f"Snell while the vertices moved along the ray direction.",
+           passed=worst > 1.0)
+    assert worst > 1.0, "wdir is not tracking the ray direction"
 
 
 # ---------------------------------------------------------------------------

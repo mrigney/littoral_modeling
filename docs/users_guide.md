@@ -287,12 +287,34 @@ Hormuz export at 0.25 m: p99.9 one-cell jump in wave amplitude **0.375** under
 
 | Your coast | Use | Cost |
 |---|---|---|
-| Synthetic, smooth | `snell` | none — the premise holds |
-| Real, complex | `blend` | loses headland focusing |
+| Synthetic, smooth | `snell` | none — the premise holds, exactly and for free |
+| Real, complex | `rays` | a scene-level solve, cached; **frames get faster** |
+| Real, complex, in a hurry | `blend` | loses headland focusing |
 
-`blend` turns the waves toward shore but leaves height alone. It is a workaround
-for a missing solver, not a preference — the replacement is designed in
-[phase5b_refraction.md](phase5b_refraction.md).
+`blend` turns the waves toward shore but leaves height alone. It was a
+workaround for a missing solver; the solver now exists.
+
+**`rays`** integrates rays through the celerity field and measures the energy
+that arrives, so `Kr` stops being assumed. It never reads `shore_normal` — the
+seams come from `shore_normal`, so they cannot survive that — while keeping the
+focusing `blend` discards. It is not the default because selecting it changes
+the wave height in almost every sheltered cell, and breaking, foam and wetness
+all follow that height.
+
+It needs a ray field, solved once per scene and passed in:
+
+```python
+from pywave import rays
+rf = rays.BandedRayField.solve(bathy, cfg, tileset, cache_dir="runs/myscene/rays")
+nf = nearshore.transform(tileset, bathy, cfg, x, y, t, ray_field=rf)
+m  = mesh.build_water_mesh(tileset, bathy, cfg, t=0.0, ray_field=rf)
+```
+
+`transform` will not solve one for you: it is called many times per scene and
+the solve is seconds to minutes, so a forgotten `ray_field=` raises rather than
+quietly re-solving on every call. With `cache_dir` set, the second run of a
+scene reads it back — 17.6 s to 0.42 s on the straits crop — keyed by a hash of
+the bathymetry and sea state, so it invalidates when either changes.
 
 **`nearshore.foam_coverage`** — the coverage a continuously breaking cell settles
 at. The seeding rate is *derived* from this and the half life, so the equilibrium
