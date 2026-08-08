@@ -1,8 +1,16 @@
 # Phase 5b — refraction on a complex coastline
 
 **Status: the solver is built and gated; it is not wired into production.**
-`pywave/rays.py` passes 5b.1, 5b.2 and 5b.8, and `nearshore.transform` still has
-no `"rays"` mode. Section 5b below has the per-gate detail.
+`pywave/rays.py` passes every gate except 5b.7, and `nearshore.transform` still
+has no `"rays"` mode — so 5b.6, the one that motivated the phase, is still a
+strict xfail against the old code. Section 5b below has the per-gate detail.
+
+What remains before it can be wired in is one thing, not several: **the gain and
+direction fields are single-frequency.** `transform` applies shoaling and
+refraction per spectral band, and `RayField.solve` takes one `omega`. Closing
+that means one solve per tile frequency, and it is the same job as teaching
+`transform` the `"rays"` mode. The per-band wind sea
+(`wind_sea_floor(bands=...)`) is already built and waiting for it.
 
 A design for replacing the per-cell refraction approximation with something that
 survives a real shoreline, plus the gate that would say it works.
@@ -215,10 +223,19 @@ is untouched until the gates pass.
 | 5b.1 straight beach reduces to Snell | **PASS** | worst 0.02 / 0.50 / 1.78% at 0 / 20 / 40° incidence, against 2% |
 | 5b.2 continuity | **PASS** | 0.0123 on the full export, 0.0141 on the crop, against 0.02 |
 | 5b.3 no annihilation | **PASS** | 0.0896 on the full export, 0.1164 on the crop, against 0.05 |
-| 5b.4, 5b.5, 5b.7 | not started | — |
+| 5b.4 focusing survives | **PASS** | headland/bay 1.34 at 2–5 m depth, against 1.2 |
+| 5b.5 energy conservation | **PASS** | 0.024% flux drift across a focusing shoal, against 5% |
 | 5b.6 independent of `shore_normal` | pinned as a strict xfail | 0.0246 m today, must be 0 |
+| 5b.7 mild-slope agreement | not started | — |
 | 5b.8 reproducibility | **PASS** | bitwise, on a repeat solve |
 | 5b.9 cost | recorded | 14 s for the crop at `decimate=32`, 77 s for the full export at `decimate=4` |
+
+Direction, added after the gate list was written, is validated the same way the
+gain is: on a planar beach against Snell solved on the full dispersion relation,
+worst error **0.017°** at 20° incidence and **0.038°** at 40°, over bands where
+the rays turn 13.6° and 27.5°. 5b.1 alone could not have caught a solver that
+turned the waves any way it liked, because a wave can turn without changing
+height — and on a mild slope at normal incidence it mostly does.
 
 Where each number comes from, because they are measured on two different scenes:
 

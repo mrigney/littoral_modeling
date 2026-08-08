@@ -4,12 +4,12 @@
 
 | | |
 |---|---|
-| generated | 2026-08-08 15:12:29 UTC |
-| git_sha | `beeb1ffd8c7063009cbf6650ada533200a14fbb8 (working tree dirty)` |
+| generated | 2026-08-08 15:19:24 UTC |
+| git_sha | `daafce3c85e34dff834f255d4e2e0ef5eed3b6bd (working tree dirty)` |
 | scene | `configs/test_lake.yaml` |
 | python | 3.14.5 (Windows AMD64) |
 | numpy / scipy | 2.5.1 / 1.18.0 |
-| checks recorded | 159 |
+| checks recorded | 161 |
 | exit status | PASS |
 
 Every number below was measured by the test suite against the implementation in this commit. Tolerances are the gate criteria from `littoral-water-implementation-cookbook.md`, except where a deviation is recorded in [Gate deviations](#gate-deviations).
@@ -260,6 +260,8 @@ Notes:
 | p99.9 gain jump over 4 m of open water | 0.014101 | -- | -- | 2.0e-02 | PASS |
 | median gain over all wet water | 0.999766 | 1 | 2.34e-04 | 2.0e-02 | PASS |
 | min gain over wet cells (701 m crop) | 0.116441 | -- | -- | 5.0e-02 | PASS |
+| energy flux drift from deep water to the far side | 2.3924e-04 | 0 | -- | 5.0e-02 | PASS |
+| headland / bay mean gain, 2-5 m depth | 1.3349 | -- | -- | 1.2e+00 | PASS |
 | fetch growth exponent vs the integrated spectrum | 2.2080e-04 | -- | -- | 1.0e-03 | PASS |
 | shelter fetch to a known wall | 0 m | 0 m | -- | 1.0e-09 | PASS |
 | wind-sea floor on fully exposed water | 0 | 0 | -- | 0.0e+00 | PASS |
@@ -281,6 +283,8 @@ Notes:
 - **p99.9 gain jump over 4 m of open water** -- 9.2M sampled pairs on the 701 m straits crop; p99 0.0067, worst 0.0269. Against 0.8819 for `snell` and 0.3001 for `blend` on the full export. The deposition kernel is sigma = 80 m, an empirical noise control rather than a derived length -- see the approximations note in docs/phase5b_refraction.md.
 - **median gain over all wet water** -- Not imposed: the normalisation is taken on the deepest 5% only. A launch-spacing or per-ray-power error biases this away from 1 while leaving the field's shape intact.
 - **min gain over wet cells (701 m crop)** -- 0.000% of wet cells below 0.05. The gate is stated on the full export, where scripts/gate5b.py measures 0.0896 with the wind-sea floor against 0.000 without it; the crop is the affordable stand-in, not the hard case.
+- **energy flux drift from deep water to the far side** -- Seven control lines across a focusing shoal. Directionality falls to 0.870 downstream, so the rays genuinely cross; reading the same flux through sin(theta) instead of the moments drifts 5.8%.
+- **headland / bay mean gain, 2-5 m depth** -- headland 1.1231 against bay 0.8414 on a 400 m cosine embayment. Focusing accumulates shorewards: the same measurement is 1.10 at 5-10 m depth, so the band is part of the claim.
 - **fetch growth exponent vs the integrated spectrum** -- Hs/Hs_scene = (F/F_scene)^0.55 over four decades of fetch ratio. The naive sqrt(F) sits 26% high at F/F_scene = 0.01, so it would over-floor sheltered water.
 - **shelter fetch to a known wall** -- 50 cells at 10 m posts; the downwind direction returns inf everywhere (clear = True), which is what stops the floor being applied to open water.
 - **wind-sea floor on fully exposed water** -- Every direction leaves the domain without crossing land, so every direction is already carried by the rays.

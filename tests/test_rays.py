@@ -414,6 +414,107 @@ def test_5b3_no_wet_cell_is_annihilated_on_the_crop(record, crop_rays):
 
 
 # ---------------------------------------------------------------------------
+# 5b.4 / 5b.5 -- does it conserve energy, and does it still focus
+# ---------------------------------------------------------------------------
+
+
+def test_5b5_energy_flux_is_conserved_across_a_shoal(record):
+    """Gate 5b.5: flux in against flux out, criterion 5%.
+
+    A shoal deep enough that nothing breaks and periodic alongshore so nothing
+    leaves the sides, which leaves conservation as the only thing being tested.
+    The shoal focuses hard enough to form a caustic, so this also exercises the
+    case the energy-accumulation scheme was chosen for: the textbook ray-tube
+    `Kr = sqrt(b_0/b)` divides by a width that goes to zero right here.
+
+    Read through the direction moments, not through `sin(theta)`. The flux needs
+    the mean of the sines and `theta` is the sine of the mean; they part company
+    exactly where rays cross, which is 5.8% by the far side.
+    """
+    from pywave import rays
+    from pywave.spectrum import dispersion_k, group_velocity
+
+    nx, ny, dx = 200, 200, 5.0
+    X, Y = np.meshgrid(np.arange(nx) * dx, np.arange(ny) * dx)
+    depth = 20.0 - 15.0 * np.exp(-(((X - 500) / 150) ** 2
+                                   + ((Y - 500) / 150) ** 2))
+    omega = 2 * np.pi / 8.0
+
+    n_rays = 4000
+    acc = rays.trace_rays(depth, omega, dx,
+                          np.linspace(0.0, nx * dx, n_rays),
+                          np.full(n_rays, (ny - 1.5) * dx),
+                          np.full(n_rays, -np.pi / 2),
+                          ds=0.25 * dx, break_depth=0.05, wrap_x=True)
+
+    cg = group_velocity(dispersion_k(omega, np.maximum(depth, 1e-6)), depth)
+    _, fy = acc.flux(cg)
+    rows = (190, 170, 140, 100, 60, 30, 10)
+    flux = np.array([fy[r].sum() * dx for r in rows])
+    worst = float(np.abs(flux / flux[0] - 1).max())
+    dirn = float(min(acc.directionality[r].min() for r in rows))
+
+    record("5b", "energy flux drift from deep water to the far side", worst,
+           reference=0.0, tol=0.05, unit="",
+           note=f"Seven control lines across a focusing shoal. Directionality "
+                f"falls to {dirn:.3f} downstream, so the rays genuinely cross; "
+                f"reading the same flux through sin(theta) instead of the "
+                f"moments drifts 5.8%.",
+           passed=worst < 0.05)
+    assert worst < 0.05
+
+
+@pytest.mark.slow
+def test_5b4_headlands_focus_and_bays_shelter(record):
+    """Gate 5b.4: mean gain on headlands against adjacent bays, ratio > 1.2.
+
+    The physics worth keeping. Continuity and no-annihilation are both
+    satisfiable by a solver that has quietly flattened the field into a
+    depth-only shoaling curve, and this is the check that says it has not.
+
+    A cosine embayment, so headland and bay are known by construction rather
+    than inferred from a shape analysis of real terrain. The measurement band is
+    stated because the answer depends on it and honestly should: focusing
+    accumulates shorewards, so the ratio is 1.10 at 5-10 m and 1.34 at 2-5 m.
+    Quoting the number without the depth would be quoting the band.
+    """
+    import dataclasses
+
+    from pywave import load_config, rays
+    from pywave.bathymetry import Bathymetry
+
+    cfg = load_config(REPO / "configs" / "coastal_bay.yaml")
+    cfg = dataclasses.replace(
+        cfg, wind=dataclasses.replace(cfg.wind, direction_rad=np.pi / 2))
+
+    wavelength = 400.0
+    bathy = Bathymetry.dean_embayment(nx=400, ny=400, dx=2.0, shoreline_y=600.0,
+                                      amplitude=100.0, wavelength=wavelength,
+                                      dean_a=0.25, max_depth=15.0)
+    rf = rays.RayField.solve(bathy, cfg, cfg.omega_p, decimate=2, n_dirs=15,
+                             rays_per_dir=1500, smooth_m=40.0)
+
+    ax, ay = bathy.meta.axes()
+    X, _ = np.meshgrid(ax, ay)
+    # Land juts seaward where the cosine is -1, and the water intrudes where
+    # it is +1 -- so the headlands sit half a wavelength off the bays.
+    headland = np.abs(((X - wavelength / 2) % wavelength)) < 60.0
+    bay = np.abs(X % wavelength) < 60.0
+    band = (bathy.depth > 2.0) & (bathy.depth < 5.0)
+
+    h = float(rf.gain[band & headland].mean())
+    b = float(rf.gain[band & bay].mean())
+    ratio = h / b
+    record("5b", "headland / bay mean gain, 2-5 m depth", ratio, tol=1.2,
+           unit="", note=f"headland {h:.4f} against bay {b:.4f} on a 400 m "
+                         f"cosine embayment. Focusing accumulates shorewards: "
+                         f"the same measurement is 1.10 at 5-10 m depth, so the "
+                         f"band is part of the claim.",
+           passed=ratio > 1.2)
+    assert ratio > 1.2
+
+
+# ---------------------------------------------------------------------------
 # 5b.3 -- the one term here that is not ray theory
 # ---------------------------------------------------------------------------
 
