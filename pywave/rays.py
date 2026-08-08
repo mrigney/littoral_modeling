@@ -65,7 +65,8 @@ import numpy as np
 
 from .constants import G
 
-__all__ = ["celerity_fields", "launch_line", "trace_rays", "RayField"]
+__all__ = ["celerity_fields", "launch_line", "trace_rays", "shelter_fetch",
+           "wind_sea_floor", "RayField"]
 
 
 # ---------------------------------------------------------------------------
@@ -299,6 +300,114 @@ def trace_rays(depth, omega, dx, x0, y0, theta0, *, origin=(0.0, 0.0),
 
 
 # ---------------------------------------------------------------------------
+# What the rays cannot carry: the locally generated sea
+# ---------------------------------------------------------------------------
+
+# Hs grows as fetch^0.55 in this model, so energy grows as fetch^1.10.
+#
+# Not a fitted number and not a round one. JONSWAP's dimensionless-energy law
+# gives ``Hs ~ sqrt(X~)``, and this package's spectrum sits a further
+# ``X~^0.05`` above that fit -- the documented inconsistency between JONSWAP's
+# two independently fitted power laws, see spectrum.hs_ratio_spectral_to_fit.
+# Since ``X~`` is linear in fetch, the exponent that matters here is the sum.
+# Using 0.5 would floor a sheltered cell against a sea the surface synthesis
+# does not actually produce; test_5b3b pins this against `hs_spectral` itself.
+_HS_FETCH_EXPONENT = 0.50 + 0.05
+_ENERGY_FETCH_EXPONENT = 2.0 * _HS_FETCH_EXPONENT
+
+
+def shelter_fetch(depth, dx, thetas, *, origin=(0.0, 0.0), max_fetch=None,
+                  min_depth_for_land: float = 0.0):
+    """Distance upwind to the nearest land, per cell, per direction.
+
+    Returns ``(n_dirs, ny, nx)`` in metres, with ``inf`` where the path is
+    **clear** -- meaning it left the domain, or reached ``max_fetch``, without
+    crossing land. The distinction between "blocked at 200 m" and "clear" is the
+    whole content of this function; a clear direction is one the rays already
+    account for, and only a blocked one has a sheltered sea behind it.
+
+    ``thetas`` are the directions the waves travel **toward**, matching the ray
+    fan, so the march is backwards along each of them.
+
+    The march is one grid cell per step with an active set that shrinks as cells
+    resolve, which is what keeps this affordable: on a real coastline most cells
+    hit land within a few hundred metres and drop out immediately, and the ones
+    that do not leave the domain.
+    """
+    depth = np.asarray(depth, dtype=np.float64)
+    ny, nx = depth.shape
+    ox, oy = origin
+    land = depth <= min_depth_for_land
+    if max_fetch is None:
+        max_fetch = float(dx * (nx + ny))
+
+    yy, xx = np.mgrid[0:ny, 0:nx]
+    x_home = ox + xx.ravel() * dx
+    y_home = oy + yy.ravel() * dx
+    wet0 = ~land.ravel()
+
+    out = np.full((len(thetas), ny * nx), np.inf)
+    n_steps = int(np.ceil(max_fetch / dx)) + 1
+
+    for i, th in enumerate(thetas):
+        # Backwards: upwind is the direction the waves came from.
+        vx, vy = -np.cos(th) * dx, -np.sin(th) * dx
+        active = np.flatnonzero(wet0)
+        x = x_home[active].copy()
+        y = y_home[active].copy()
+        for step in range(1, n_steps + 1):
+            x += vx
+            y += vy
+            gx = (x - ox) / dx
+            gy = (y - oy) / dx
+            inside = (gx >= 0) & (gx <= nx - 1) & (gy >= 0) & (gy <= ny - 1)
+            # Nearest cell, not bilinear: "is this land" is a question about a
+            # mask, and interpolating a mask invents half-land that is neither.
+            ix = np.clip(np.rint(gx).astype(np.int64), 0, nx - 1)
+            iy = np.clip(np.rint(gy).astype(np.int64), 0, ny - 1)
+            hit = inside & land[iy, ix]
+
+            out[i, active[hit]] = step * dx
+            keep = inside & ~hit
+            if not keep.any():
+                break
+            active = active[keep]
+            x = x[keep]
+            y = y[keep]
+
+    return out.reshape(len(thetas), ny, nx)
+
+
+def wind_sea_floor(depth, dx, thetas, weights, scene_fetch, *,
+                   origin=(0.0, 0.0), max_fetch=None):
+    """Energy a sheltered cell has anyway, relative to the deep-water sea.
+
+    Ray theory has no diffraction, so a cell no ray reaches gets exactly zero.
+    That is a statement about the *incident* wave field and it is fine as far as
+    it goes -- but a sheltered bay is not calm. The wind is still blowing over
+    it, and it grows its own short-fetch sea.
+
+    So for each direction of the fan, ask how far upwind the water runs before
+    it hits land. A **blocked** direction contributes the energy the wind puts
+    back in over that distance; a **clear** direction contributes nothing here,
+    because the rays already carried it, and adding it again would count the
+    open sea twice. In fully exposed water every direction is clear and this
+    returns exactly zero, which is what makes it safe to add rather than clamp.
+
+    ``weights`` are the fan's directional weights and must sum to 1, so that a
+    hypothetical cell blocked at the full scene fetch in every direction scores
+    exactly 1 rather than ``n_dirs``.
+
+    Returns ``(ny, nx)``, in the same units as ``(ray gain)**2``.
+    """
+    fetch = shelter_fetch(depth, dx, thetas, origin=origin, max_fetch=max_fetch)
+    # A clear direction is `inf`, and contributes nothing.
+    ratio = np.where(np.isfinite(fetch), fetch / float(scene_fetch), 0.0)
+    w = np.asarray(weights, dtype=np.float64)[:, None, None]
+    return np.sum(w * np.minimum(ratio, 1.0) ** _ENERGY_FETCH_EXPONENT, axis=0)
+
+
+# ---------------------------------------------------------------------------
 # The scene-level solve
 # ---------------------------------------------------------------------------
 
@@ -324,7 +433,8 @@ class RayField:
               rays_per_dir: int = 3000, spread_deg: float = 90.0,
               ds_frac: float = 0.5, break_depth: float = 0.05,
               min_hits: float = 1.0, decimate: int = 1,
-              smooth_m: float | None = None) -> "RayField":
+              smooth_m: float | None = None,
+              wind_sea: bool = True) -> "RayField":
         """Integrate a directional wave field across the bathymetry.
 
         A single beam would give hard geometric shadows behind every headland --
@@ -353,6 +463,12 @@ class RayField:
         per cell, giving 7.3% gain noise and a p99.9 one-cell jump of 0.753 --
         which is sampling, not water. Reaching Gate 5b.2 by ray count alone would
         need 27x more sampling and about seven hours.
+
+        ``wind_sea`` adds the locally generated sea of :func:`wind_sea_floor` to
+        the transported energy. It is the one term here that is not ray theory,
+        and it is on by default because leaving it off does not give a
+        conservative answer -- it gives a sheltered bay a wave height of exactly
+        zero, which is further from the truth than any approximation in it.
         """
         from scipy.ndimage import distance_transform_edt, gaussian_filter, zoom
 
@@ -411,19 +527,49 @@ class RayField:
         # analytically also absorbs the discretisation of the fan.
         wet = depth > 0.0
 
-        # Smooth the ENERGY, not the gain: energy is what the rays sampled and
-        # is the quantity whose noise is Poisson. Normalise by a smoothed wet
-        # mask so the shoreline does not bleed dry cells inward.
-        if smooth_m:
+        def _smooth_wet(fld):
+            """Gaussian over water only, normalised by the smoothed wet mask.
+
+            Without the mask normalisation the kernel averages dry cells into
+            the water and every shoreline loses height.
+            """
             sig = float(smooth_m) / dx
-            num = gaussian_filter(np.where(wet, energy, 0.0), sig, mode="nearest")
+            num = gaussian_filter(np.where(wet, fld, 0.0), sig, mode="nearest")
             den = gaussian_filter(wet.astype(np.float64), sig, mode="nearest")
-            energy = np.where(den > 1e-6, num / np.maximum(den, 1e-6), energy)
+            return np.where(den > 1e-6, num / np.maximum(den, 1e-6), fld)
+
+        # Smooth the ENERGY, not the gain: energy is what the rays sampled and
+        # is the quantity whose noise is Poisson.
+        if smooth_m:
+            energy = _smooth_wet(energy)
 
         deep = wet & (depth >= d_ref)
         ref = float(np.median(energy[deep])) if deep.sum() > 50 else \
             float(np.median(energy[wet]))
-        gain = np.sqrt(np.maximum(energy, 0.0) / max(ref, 1e-30))
+        e_gain = np.maximum(energy, 0.0) / max(ref, 1e-30)
+
+        # The locally generated sea, added *after* the normalisation, because it
+        # is stated relative to the scene's own deep-water energy rather than to
+        # anything the rays measured.
+        floor_e = 0.0
+        if wind_sea:
+            floor_e = wind_sea_floor(depth, dx, th_w + rel, w,
+                                     cfg.wind.fetch, origin=(x0g, y0g),
+                                     max_fetch=cfg.wind.fetch)
+            # Smoothed with the same kernel as the ray energy, and for a reason
+            # that is not the same one. The ray field is smoothed because it is
+            # Monte Carlo; this is smoothed because `shelter_fetch` asks a
+            # yes/no question of a geometric line, so a cell whose upwind ray
+            # grazes a headland tip is "blocked at 6 km" while its neighbour is
+            # "not blocked at all". The fan bounds that step at one direction's
+            # weight, which is not small enough: unsmoothed it took the p99.9
+            # gain jump on the straits export from 0.0123 to 0.0235, straight
+            # through gate 5b.2. A wind sea has no knife edge either.
+            if smooth_m:
+                floor_e = _smooth_wet(floor_e)
+            e_gain = e_gain + floor_e
+
+        gain = np.sqrt(e_gain)
         gain = np.where(wet, gain, 0.0)
 
         thin = int((wet & (hits < min_hits)).sum())
@@ -456,7 +602,10 @@ class RayField:
                          "decimate": dec, "solve_dx": dx,
                          "smooth_m": float(smooth_m or 0.0),
                          "mean_visits": visits, "thin_cells": thin,
-                         "wet_cells": int(wet.sum())})
+                         "wet_cells": int(wet.sum()),
+                         "wind_sea": bool(wind_sea),
+                         "sheltered_cells": int(np.sum(wet & (np.asarray(floor_e)
+                                                              > 0.0)))})
 
     def sample(self, bathy, x, y) -> np.ndarray:
         """Gain at arbitrary scene coordinates."""

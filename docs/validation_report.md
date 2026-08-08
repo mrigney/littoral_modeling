@@ -4,12 +4,12 @@
 
 | | |
 |---|---|
-| generated | 2026-08-08 03:58:03 UTC |
-| git_sha | `3ba40fa5c2d50c892fb0fd0f92493950843ee030 (working tree dirty)` |
+| generated | 2026-08-08 04:29:14 UTC |
+| git_sha | `a943b8fabddd732a7e8ab52f40d78198707f6b4a (working tree dirty)` |
 | scene | `configs/test_lake.yaml` |
 | python | 3.14.5 (Windows AMD64) |
 | numpy / scipy | 2.5.1 / 1.18.0 |
-| checks recorded | 148 |
+| checks recorded | 151 |
 | exit status | PASS |
 
 Every number below was measured by the test suite against the implementation in this commit. Tolerances are the gate criteria from `littoral-water-implementation-cookbook.md`, except where a deviation is recorded in [Gate deviations](#gate-deviations).
@@ -249,9 +249,12 @@ Notes:
 | ray vs analytic Ks*Kr, straight beach, 20 deg | 0.004994 | -- | -- | 2.0e-02 | PASS |
 | ray vs analytic Ks*Kr, straight beach, 40 deg | 0.017821 | -- | -- | 2.0e-02 | PASS |
 | launch reference energy carries cos(alpha) | 0 | -- | -- | 1.0e-12 | PASS |
-| p99.9 gain jump over 4 m of open water | 0.014397 | -- | -- | 2.0e-02 | PASS |
-| median gain over all wet water | 0.999421 | 1 | 5.79e-04 | 2.0e-02 | PASS |
-| min gain over wet cells (701 m crop) | 0.098225 | -- | -- | 5.0e-02 | PASS |
+| p99.9 gain jump over 4 m of open water | 0.014101 | -- | -- | 2.0e-02 | PASS |
+| median gain over all wet water | 0.999766 | 1 | 2.34e-04 | 2.0e-02 | PASS |
+| min gain over wet cells (701 m crop) | 0.116441 | -- | -- | 5.0e-02 | PASS |
+| fetch growth exponent vs the integrated spectrum | 2.2080e-04 | -- | -- | 1.0e-03 | PASS |
+| shelter fetch to a known wall | 0 m | 0 m | -- | 1.0e-09 | PASS |
+| wind-sea floor on fully exposed water | 0 | 0 | -- | 0.0e+00 | PASS |
 | ray solve is bitwise reproducible | True | True | -- | -- | PASS |
 
 Notes:
@@ -261,9 +264,12 @@ Notes:
 - **ray vs analytic Ks*Kr, straight beach, 20 deg** -- 200 cells over depths 0.3-4.3 m; median 0.05%. The energy-accumulation solver is not given the closed form anywhere -- it integrates rays through the celerity field and counts what arrives.
 - **ray vs analytic Ks*Kr, straight beach, 40 deg** -- 200 cells over depths 0.3-4.3 m; median 0.13%. The energy-accumulation solver is not given the closed form anywhere -- it integrates rays through the celerity field and counts what arrives.
 - **launch reference energy carries cos(alpha)** -- e_ref must scale as 1/cos(alpha) with obliquity.
-- **p99.9 gain jump over 4 m of open water** -- 9.2M sampled pairs on the 701 m straits crop; p99 0.0067, worst 0.0272. Against 0.8819 for `snell` and 0.3001 for `blend` on the full export. The deposition kernel is sigma = 80 m, an empirical noise control rather than a derived length -- see the approximations note in docs/phase5b_refraction.md.
+- **p99.9 gain jump over 4 m of open water** -- 9.2M sampled pairs on the 701 m straits crop; p99 0.0067, worst 0.0269. Against 0.8819 for `snell` and 0.3001 for `blend` on the full export. The deposition kernel is sigma = 80 m, an empirical noise control rather than a derived length -- see the approximations note in docs/phase5b_refraction.md.
 - **median gain over all wet water** -- Not imposed: the normalisation is taken on the deepest 5% only. A launch-spacing or per-ray-power error biases this away from 1 while leaving the field's shape intact.
-- **min gain over wet cells (701 m crop)** -- 0.000% of wet cells below 0.05. Scoped to the crop: the full straits export gives 0.006 and gate 5b.3 remains open there, pending the short-fetch wind-sea floor.
+- **min gain over wet cells (701 m crop)** -- 0.000% of wet cells below 0.05. The gate is stated on the full export, where scripts/gate5b.py measures 0.0896 with the wind-sea floor against 0.000 without it; the crop is the affordable stand-in, not the hard case.
+- **fetch growth exponent vs the integrated spectrum** -- Hs/Hs_scene = (F/F_scene)^0.55 over four decades of fetch ratio. The naive sqrt(F) is 10% low at F/F_scene = 0.01.
+- **shelter fetch to a known wall** -- 50 cells at 10 m posts; the downwind direction returns inf everywhere (clear = True), which is what stops the floor being applied to open water.
+- **wind-sea floor on fully exposed water** -- Every direction leaves the domain without crossing land, so every direction is already carried by the rays.
 - **ray solve is bitwise reproducible** -- No RNG, but the energy accumulator is summed in a buffered order; floating-point addition is not associative, so a flush-boundary-dependent order would show up here.
 
 ## Gate 6 -- mesh generation and export

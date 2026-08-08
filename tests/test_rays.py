@@ -284,33 +284,128 @@ def test_5b2b_deep_water_gain_is_one_without_being_told_to(record, crop_rays):
 @pytest.mark.slow
 @has_crop
 def test_5b3_no_wet_cell_is_annihilated_on_the_crop(record, crop_rays):
-    """Gate 5b.3: min gain over wet cells, against 0.05. Scoped to the crop.
+    """Gate 5b.3: min gain over wet cells, against 0.05. Measured on the crop.
 
-    Read the name. This passes on 701 m of coastline and does **not** close
-    gate 5b.3, which is stated on the full 7.5 x 8.6 km export and still gives
-    0.006 there. Ray theory has no diffraction, so a cell behind a headland
-    that no ray reaches gets exactly zero; a 15-direction fan over +/-90 degrees
-    softens that without removing it, and the longer the sheltered fetch, the
-    deeper the hole. The crop simply has no shadow long enough to reach zero.
+    Read the name: 701 m of coastline is not the hard case. Ray theory has no
+    diffraction, so a cell behind a headland that no ray reaches gets exactly
+    zero, and the longer the sheltered run the deeper the hole -- the crop has
+    no shadow long enough to reach zero on its own, and scored 0.098 here even
+    before `wind_sea_floor` existed.
 
-    The fix is not more rays. It is a floor from locally generated waves -- a
-    sheltered bay is not calm, it has its own short-fetch wind sea -- which is
-    the next piece of work and is not built yet.
+    The gate is stated on the full 7.5 x 8.6 km export, where pure ray theory
+    gives **0.000** with 1.84% of wet cells under 0.05, and the wind-sea floor
+    takes it to **0.0896** while leaving 5b.2 unchanged at 0.0123. That solve is
+    minutes rather than seconds, so it lives in `scripts/gate5b.py` and not
+    here; run it with and without `--no-wind-sea` to see the A/B.
 
-    What this does pin is that nothing *else* annihilates a cell: not the
+    What this pins is that nothing *else* annihilates a cell -- not the
     decimation seam, not the deep-water normalisation, not the ray-retirement
-    rule.
+    rule -- on bathymetry that has a real medial axis and a real ragged shore.
     """
     bathy, rf, _ = crop_rays
     g = rf.gain[bathy.depth > 0.0]
     lo = float(g.min())
     dark = float((g < 0.05).mean())
     record("5b", "min gain over wet cells (701 m crop)", lo, tol=0.05, unit="",
-           note=f"{dark:.3%} of wet cells below 0.05. Scoped to the crop: the "
-                f"full straits export gives 0.006 and gate 5b.3 remains open "
-                f"there, pending the short-fetch wind-sea floor.",
+           note=f"{dark:.3%} of wet cells below 0.05. The gate is stated on the "
+                f"full export, where scripts/gate5b.py measures 0.0896 with the "
+                f"wind-sea floor against 0.000 without it; the crop is the "
+                f"affordable stand-in, not the hard case.",
            passed=lo > 0.05)
     assert lo > 0.05
+
+
+# ---------------------------------------------------------------------------
+# 5b.3 -- the one term here that is not ray theory
+# ---------------------------------------------------------------------------
+
+
+def test_5b3b_the_fetch_growth_exponent_matches_this_spectrum(record):
+    """The floor must grow like the sea this package actually synthesises.
+
+    `Hs ~ sqrt(fetch)` is the JONSWAP dimensionless-energy fit, and it is *not*
+    what integrating this module's spectrum gives -- that sits a further
+    `X~^0.05` above it, the documented inconsistency between JONSWAP's two
+    independently fitted power laws. Take the exponent from the fit rather than
+    from the spectrum and every sheltered cell is floored against a sea the
+    surface synthesis never produces: 10% low at a hundredth of the scene fetch.
+
+    So this checks the constant against `hs_spectral` itself -- a quadrature
+    over the real spectrum -- rather than against the algebra it came from.
+    """
+    from pywave.rays import _HS_FETCH_EXPONENT
+    from pywave.spectrum import hs_spectral
+
+    u10, f_scene = 12.0, 40000.0
+    worst = 0.0
+    for f in (100.0, 1000.0, 5000.0, 20000.0):
+        got = hs_spectral(u10, f) / hs_spectral(u10, f_scene)
+        want = (f / f_scene) ** _HS_FETCH_EXPONENT
+        worst = max(worst, abs(got - want) / got)
+    record("5b", "fetch growth exponent vs the integrated spectrum", worst,
+           tol=1e-3, unit="",
+           note=f"Hs/Hs_scene = (F/F_scene)^{_HS_FETCH_EXPONENT} over four "
+                f"decades of fetch ratio. The naive sqrt(F) is 10% low at "
+                f"F/F_scene = 0.01.",
+           passed=worst < 1e-3)
+    assert worst < 1e-3
+
+
+def test_shelter_fetch_measures_distance_to_land_and_knows_when_there_is_none(record):
+    """A wall upwind at a known distance, and open water in the other direction.
+
+    The `inf` case is the one that carries the weight. "Blocked at 900 m" and
+    "not blocked at all" have to be different answers, because a clear direction
+    is one the rays already carry and flooring it would count the open sea
+    twice -- which would show up as gain clamped to 1 across the whole domain.
+    """
+    from pywave import rays
+
+    nx = ny = 60
+    dx = 10.0
+    depth = np.full((ny, nx), 8.0)
+    depth[:, :10] = -1.0                      # land wall on the -X side
+
+    # theta = 0 travels toward +X, so upwind is -X and every cell sees the wall.
+    # theta = pi travels toward -X: upwind is +X, open all the way out.
+    fetch = rays.shelter_fetch(depth, dx, [0.0, np.pi])
+
+    j = np.arange(nx)
+    want = np.where(j >= 10, (j - 9) * dx, np.nan)[10:]
+    got = fetch[0, ny // 2, 10:]
+    err = float(np.abs(got - want).max())
+
+    clear = bool(np.all(np.isinf(fetch[1, :, 10:])))
+    record("5b", "shelter fetch to a known wall", err, reference=0.0, tol=1e-9,
+           unit="m", note=f"50 cells at 10 m posts; the downwind direction "
+                          f"returns inf everywhere (clear = {clear}), which is "
+                          f"what stops the floor being applied to open water.",
+           passed=err < 1e-9 and clear)
+    assert err < 1e-9
+    assert clear
+
+
+def test_5b3c_exposed_water_receives_no_floor_at_all(record):
+    """Exactly zero, not merely small -- that is what makes it safe to *add*.
+
+    The floor is added to the transported energy rather than clamped over it.
+    That is only defensible if it vanishes where the rays already have the
+    answer; otherwise it is the open sea counted twice, and it would show up as
+    a gain floored at 1.0 across every unobstructed cell.
+    """
+    from pywave import rays
+
+    depth = np.full((40, 40), 10.0)           # no land anywhere
+    thetas = np.radians([20.0, 45.0, 70.0])
+    weights = np.full(3, 1 / 3)
+    floor = rays.wind_sea_floor(depth, 25.0, thetas, weights, 7000.0)
+    worst = float(np.abs(floor).max())
+    record("5b", "wind-sea floor on fully exposed water", worst, reference=0.0,
+           tol=0.0, unit="",
+           note="Every direction leaves the domain without crossing land, so "
+                "every direction is already carried by the rays.",
+           passed=worst == 0.0)
+    assert worst == 0.0
 
 
 @pytest.mark.slow

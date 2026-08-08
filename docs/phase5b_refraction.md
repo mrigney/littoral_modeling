@@ -213,22 +213,26 @@ is untouched until the gates pass.
 | Gate | Status | Measured |
 |---|---|---|
 | 5b.1 straight beach reduces to Snell | **PASS** | worst 0.02 / 0.50 / 1.78% at 0 / 20 / 40° incidence, against 2% |
-| 5b.2 continuity | **PASS** | 0.0144 on the crop, against 0.02 — see below |
-| 5b.3 no annihilation | **PASS on the 701 m crop, open on the full export** | 0.098 on the crop; **0.006** on the full straits |
+| 5b.2 continuity | **PASS** | 0.0123 on the full export, 0.0141 on the crop, against 0.02 |
+| 5b.3 no annihilation | **PASS** | 0.0896 on the full export, 0.1164 on the crop, against 0.05 |
 | 5b.4, 5b.5, 5b.7 | not started | — |
 | 5b.6 independent of `shore_normal` | pinned as a strict xfail | 0.0246 m today, must be 0 |
 | 5b.8 reproducibility | **PASS** | bitwise, on a repeat solve |
-| 5b.9 cost | recorded | 16 s for the crop at `decimate=32`; 348 s for the full export at `decimate=4` |
+| 5b.9 cost | recorded | 14 s for the crop at `decimate=32`, 77 s for the full export at `decimate=4` |
 
-`tests/test_rays.py` runs 5b.1 on the planar beach and 5b.2, 5b.3 and 5b.8 on
-the `straits_crop` export, skipping the last three when no export is present.
-They share one solve at `decimate=32, n_dirs=15, rays_per_dir=1500,
-smooth_m=80`, stated once so no gate can be passed by retuning the solve for it.
+Where each number comes from, because they are measured on two different scenes:
 
-**5b.3 is not closed.** It passes on 701 m of coastline and fails on 7.5 km, and
-the difference is fetch, not method: the crop has no sheltered run long enough
-for a shadow to reach zero. Reporting it as PASS without that qualifier would be
-reporting the size of the test scene.
+- `tests/test_rays.py` runs 5b.1 on the planar beach and 5b.2, 5b.3 and 5b.8 on
+  the **701 m crop**, skipping the last three when no export is present. They
+  share one solve at `decimate=32, n_dirs=15, rays_per_dir=1500, smooth_m=80`,
+  stated once so that no gate can be passed by retuning the solve for it.
+- `scripts/gate5b.py` runs the same checks on the **full 7.5 × 8.6 km export**,
+  which is where the gates are actually stated and where a solve is minutes
+  rather than seconds. It takes `--no-wind-sea` for the A/B below.
+
+The crop is not the hard case and should not be read as one: its shadows are too
+short to reach zero on their own. It is in the suite because it is affordable
+and it is real bathymetry; the export is what the gate means.
 
 ### Measuring a "one-cell jump"
 
@@ -309,16 +313,66 @@ land at all.
 
 Ray theory has no diffraction, so a cell behind a headland that no ray reaches
 gets exactly zero. The 25-direction fan over ±90° softens this without removing
-it: min gain 0.006 on the full export.
+it: min gain 0.000 on the full export, with **1.84%** of wet cells under 0.05.
 
-The crop passing at 0.098 does not weaken this. Both numbers are the same
-mechanism read at two fetches — the deeper the sheltered run, the further the
-hole goes — so the crop bounds how bad the shallow case is and says nothing
-about the deep one.
+More rays was never the answer, because the missing energy is not energy the
+rays could have carried. A sheltered bay is not calm — the wind is still blowing
+over it, and it grows **its own short-fetch sea**. `rays.wind_sea_floor` adds
+that, and it is a real term rather than a clamp.
 
-The answer is probably not more rays but a **floor from locally generated waves**.
-A sheltered bay is not calm — it has its own short-fetch wind sea. That is a real
-term rather than a clamp, and it is the next piece of work.
+### How the floor avoids counting the open sea twice
+
+For each direction of the fan, march upwind and ask how far the water runs
+before it hits land. Then:
+
+- A **blocked** direction contributes the energy the wind puts back in over that
+  distance, `(F_blocked / F_scene)^1.10`.
+- A **clear** direction — one that leaves the domain, or reaches the scene fetch,
+  without crossing land — contributes **exactly zero**, because the rays already
+  carried it. Adding it again would be the open sea counted twice, and it would
+  surface as a gain floored at 1.0 across every unobstructed cell.
+
+That second rule is what makes the term safe to *add* to the transported energy
+instead of clamping over it. On fully exposed water the floor is identically
+zero, so the sum is a no-op and nothing the rays computed is overwritten.
+
+**The exponent is 1.10, not 1.00.** `Hs ~ sqrt(fetch)` is JONSWAP's
+dimensionless-energy fit, and it is not what integrating *this* spectrum gives —
+that sits a further `X~^0.05` above it, the same inconsistency recorded under
+Gate 1 in the validation report. So `Hs ~ F^0.55` and energy `~ F^1.10`. Taking
+the exponent from the fit would floor every sheltered cell against a sea the
+surface synthesis never produces: 10% low at a hundredth of the scene fetch. The
+constant is pinned against `hs_spectral` itself, not against the algebra.
+
+### The floor needs the same kernel as the rays, for a different reason
+
+`shelter_fetch` asks a yes/no question of a geometric line, so a cell whose
+upwind ray grazes a headland tip is "blocked at 6 km" while its neighbour is
+"not blocked at all". The fan bounds that step at one direction's weight, and
+that is not small enough. Added unsmoothed, it took the p99.9 gain jump on the
+straits export from 0.0123 to **0.0235** — straight through gate 5b.2, having
+just fixed 5b.3.
+
+The ray field is smoothed because it is Monte Carlo. The floor is smoothed
+because a wind sea has no knife edge either. Same kernel, unrelated
+justifications, and both belong in the approximations table.
+
+### What the floor actually bought
+
+`scripts/gate5b.py configs/straits.yaml`, with and without `--no-wind-sea`, at
+`decimate=4, 15 dirs x 1500 rays, sigma 80 m`:
+
+| | min gain | wet cells under 0.05 | 5b.2 p99.9 |
+|---|---|---|---|
+| rays only | **0.000** | 1.84% | 0.0123 |
+| + wind sea, floor unsmoothed | 0.0384 | 0.0030% | **0.0235** |
+| **+ wind sea, floor smoothed** | **0.0896** | **0.0000%** | **0.0123** |
+
+The third row is the point: 5b.3 goes from a hard zero to comfortably inside the
+gate, and 5b.2 is **unchanged to four decimals** — the floor is not buying one
+gate with the other. 99.3% of wet cells have some direction blocked, so this is
+not a term that only touches a few corners of the domain; it is doing work
+almost everywhere and still leaving the ray solution alone where it matters.
 
 ---
 
