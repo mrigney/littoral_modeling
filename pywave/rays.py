@@ -310,8 +310,16 @@ def trace_rays(depth, omega, dx, x0, y0, theta0, *, origin=(0.0, 0.0),
 # ``X~^0.05`` above that fit -- the documented inconsistency between JONSWAP's
 # two independently fitted power laws, see spectrum.hs_ratio_spectral_to_fit.
 # Since ``X~`` is linear in fetch, the exponent that matters here is the sum.
-# Using 0.5 would floor a sheltered cell against a sea the surface synthesis
-# does not actually produce; test_5b3b pins this against `hs_spectral` itself.
+#
+# The extra 0.05 makes this spectrum grow *faster* with fetch, so a short-fetch
+# cell sits *lower* than the plain energy law says -- 12% lower in Hs per decade
+# of fetch ratio, 26% at a hundredth of the scene fetch. Using 0.5 would
+# therefore over-floor every sheltered cell, against a sea the surface synthesis
+# does not produce. test_5b3b pins this against `hs_spectral` itself.
+#
+# Note the direction on the energy side, which is easy to read backwards: the
+# fetch ratio is capped at 1, so the 1.10 exponent always yields *less* energy
+# than 1.00 would, by 21% at a tenth of the scene fetch and 37% at a hundredth.
 _HS_FETCH_EXPONENT = 0.50 + 0.05
 _ENERGY_FETCH_EXPONENT = 2.0 * _HS_FETCH_EXPONENT
 

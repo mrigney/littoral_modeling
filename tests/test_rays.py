@@ -326,9 +326,13 @@ def test_5b3b_the_fetch_growth_exponent_matches_this_spectrum(record):
     `Hs ~ sqrt(fetch)` is the JONSWAP dimensionless-energy fit, and it is *not*
     what integrating this module's spectrum gives -- that sits a further
     `X~^0.05` above it, the documented inconsistency between JONSWAP's two
-    independently fitted power laws. Take the exponent from the fit rather than
-    from the spectrum and every sheltered cell is floored against a sea the
-    surface synthesis never produces: 10% low at a hundredth of the scene fetch.
+    independently fitted power laws.
+
+    The extra 0.05 makes this spectrum grow *faster* with fetch, so a
+    short-fetch cell sits *lower* than the plain energy law predicts. Taking the
+    exponent from the fit would therefore over-floor every sheltered cell, by
+    12% in Hs per decade of fetch ratio and 26% at a hundredth of the scene
+    fetch, against a sea the surface synthesis never produces.
 
     So this checks the constant against `hs_spectral` itself -- a quadrature
     over the real spectrum -- rather than against the algebra it came from.
@@ -345,8 +349,8 @@ def test_5b3b_the_fetch_growth_exponent_matches_this_spectrum(record):
     record("5b", "fetch growth exponent vs the integrated spectrum", worst,
            tol=1e-3, unit="",
            note=f"Hs/Hs_scene = (F/F_scene)^{_HS_FETCH_EXPONENT} over four "
-                f"decades of fetch ratio. The naive sqrt(F) is 10% low at "
-                f"F/F_scene = 0.01.",
+                f"decades of fetch ratio. The naive sqrt(F) sits 26% high at "
+                f"F/F_scene = 0.01, so it would over-floor sheltered water.",
            passed=worst < 1e-3)
     assert worst < 1e-3
 

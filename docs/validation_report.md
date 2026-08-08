@@ -4,8 +4,8 @@
 
 | | |
 |---|---|
-| generated | 2026-08-08 04:29:14 UTC |
-| git_sha | `a943b8fabddd732a7e8ab52f40d78198707f6b4a (working tree dirty)` |
+| generated | 2026-08-08 04:42:51 UTC |
+| git_sha | `5ecb415e6fc0062fb5156a74ed8fd3a7549f906b (working tree dirty)` |
 | scene | `configs/test_lake.yaml` |
 | python | 3.14.5 (Windows AMD64) |
 | numpy / scipy | 2.5.1 / 1.18.0 |
@@ -267,7 +267,7 @@ Notes:
 - **p99.9 gain jump over 4 m of open water** -- 9.2M sampled pairs on the 701 m straits crop; p99 0.0067, worst 0.0269. Against 0.8819 for `snell` and 0.3001 for `blend` on the full export. The deposition kernel is sigma = 80 m, an empirical noise control rather than a derived length -- see the approximations note in docs/phase5b_refraction.md.
 - **median gain over all wet water** -- Not imposed: the normalisation is taken on the deepest 5% only. A launch-spacing or per-ray-power error biases this away from 1 while leaving the field's shape intact.
 - **min gain over wet cells (701 m crop)** -- 0.000% of wet cells below 0.05. The gate is stated on the full export, where scripts/gate5b.py measures 0.0896 with the wind-sea floor against 0.000 without it; the crop is the affordable stand-in, not the hard case.
-- **fetch growth exponent vs the integrated spectrum** -- Hs/Hs_scene = (F/F_scene)^0.55 over four decades of fetch ratio. The naive sqrt(F) is 10% low at F/F_scene = 0.01.
+- **fetch growth exponent vs the integrated spectrum** -- Hs/Hs_scene = (F/F_scene)^0.55 over four decades of fetch ratio. The naive sqrt(F) sits 26% high at F/F_scene = 0.01, so it would over-floor sheltered water.
 - **shelter fetch to a known wall** -- 50 cells at 10 m posts; the downwind direction returns inf everywhere (clear = True), which is what stops the floor being applied to open water.
 - **wind-sea floor on fully exposed water** -- Every direction leaves the domain without crossing land, so every direction is already carried by the rays.
 - **ray solve is bitwise reproducible** -- No RNG, but the energy accumulator is summed in a buffered order; floating-point addition is not associative, so a flush-boundary-dependent order would show up here.

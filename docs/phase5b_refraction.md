@@ -339,10 +339,25 @@ zero, so the sum is a no-op and nothing the rays computed is overwritten.
 **The exponent is 1.10, not 1.00.** `Hs ~ sqrt(fetch)` is JONSWAP's
 dimensionless-energy fit, and it is not what integrating *this* spectrum gives —
 that sits a further `X~^0.05` above it, the same inconsistency recorded under
-Gate 1 in the validation report. So `Hs ~ F^0.55` and energy `~ F^1.10`. Taking
-the exponent from the fit would floor every sheltered cell against a sea the
-surface synthesis never produces: 10% low at a hundredth of the scene fetch. The
-constant is pinned against `hs_spectral` itself, not against the algebra.
+Gate 1 in the validation report. So `Hs ~ F^0.55` and energy `~ F^1.10`, and the
+constant is pinned against `hs_spectral` itself rather than against the algebra.
+
+Both directions are easy to read backwards, so both are worth stating.
+
+| F / F_scene | Hs at 0.55 | Hs at 0.50 | naive is | energy at 1.10 | energy at 1.00 | 1.10 gives |
+|---|---|---|---|---|---|---|
+| 0.001 | 0.0224 | 0.0316 | +41% | 0.000501 | 0.00100 | 0.50× |
+| 0.01 | 0.0794 | 0.1000 | +26% | 0.006310 | 0.01000 | 0.63× |
+| 0.1 | 0.2818 | 0.3162 | +12% | 0.079433 | 0.10000 | 0.79× |
+
+The extra `X~^0.05` makes this spectrum grow *faster* with fetch, so a
+short-fetch cell sits **lower** than the plain energy law predicts. Taking the
+exponent from the fit would over-floor every sheltered cell against a sea the
+surface synthesis never produces.
+
+And the exponent is not a 10% inflation of anything: the fetch ratio is capped
+at 1, so 1.10 always yields **less** energy than 1.00 would, by 37% at a
+hundredth of the scene fetch. It is the conservative choice of the two.
 
 ### The floor needs the same kernel as the rays, for a different reason
 
