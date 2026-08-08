@@ -372,6 +372,41 @@ The ray field is smoothed because it is Monte Carlo. The floor is smoothed
 because a wind sea has no knife edge either. Same kernel, unrelated
 justifications, and both belong in the approximations table.
 
+### The floor knows the height, and now the frequency too
+
+One number for the floor is right about how much energy a sheltered cell has and
+silent about **what kind of waves** it is. That silence is not a detail. A short
+fetch does not scale the spectrum down, it moves the peak **up** — at 200 m of
+fetch the peak period is 0.91 s against the incident sea's 2.95 s — so a
+sheltered bay is short steep chop with no swell in it, not a small copy of the
+incident swell.
+
+`band_fetch_response` tabulates `m0_band(F) / m0_band(F_scene)` per band. On the
+straits crop, as a multiplier on each band's *own* deep-water energy:
+
+| local fetch | band 1 | band 2 | band 3 | scalar |
+|---|---|---|---|---|
+| 2000 m | 0.052 | **1.222** | 1.125 | 0.252 |
+| 500 m | 0.000 | 0.023 | **1.057** | 0.055 |
+| 200 m | 0.000 | 0.000 | **0.403** | 0.020 |
+
+The scalar is wrong in both directions — 5× too much energy in the long band,
+20× too little in the short one. Note bands 2 and 3 exceeding 1.0: a sheltered
+cell genuinely holds *more* short-wave energy than open water, because the whole
+spectrum shifted into that band, and a ratio capped at 1 cannot say so.
+
+**What this does not change is the total.** Summed over bands weighted by their
+deep-water shares, the banded form agrees with `(F/F_scene)^1.10` to 4e-4 — the
+residual is the variance above the top band edge. So gate 5b.3, which is a
+statement about total height, is indifferent to all of this. What depends on it
+is every per-band quantity downstream, which is to say the texture of a
+sheltered bay rather than its wave height.
+
+`wind_sea_floor(..., bands=...)` returns `(n_bands, ny, nx)` and is ready for
+the wiring step. `RayField.gain` is still a single field, because making it
+per-band requires one ray solve per tile frequency — that is the same job as
+teaching `nearshore.transform` a `"rays"` mode, and it is not done yet.
+
 ### What the floor actually bought
 
 `scripts/gate5b.py configs/straits.yaml`, with and without `--no-wind-sea`, at

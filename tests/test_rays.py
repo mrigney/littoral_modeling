@@ -412,6 +412,89 @@ def test_5b3c_exposed_water_receives_no_floor_at_all(record):
     assert worst == 0.0
 
 
+def _wall_scene(nx=40, ny=40, dx=50.0, land_cols=2):
+    """Open water with a land wall on the -X side, so upwind fetch is exact."""
+    depth = np.full((ny, nx), 8.0)
+    depth[:, :land_cols] = -1.0
+    return depth, dx
+
+
+def test_per_band_floor_agrees_with_the_scalar_on_the_total(record):
+    """Splitting the floor across bands must not create or destroy energy.
+
+    The two are computed by different routes -- the scalar from the closed-form
+    `(F/F_scene)^1.10`, the banded one by integrating the short-fetch spectrum
+    over each band's wavenumber range -- so agreeing on the share-weighted total
+    is a real cross-check on both, not an identity.
+
+    It also settles what the per-band work does and does not affect: gate 5b.3
+    is a statement about total height, so it is indifferent to this. What
+    depends on it is every per-band quantity downstream of `transform`.
+    """
+    from pywave import load_config, rays, tiling
+    from pywave.tiling import band_edges
+
+    cfg = load_config(REPO / "configs" / "straits_crop.yaml")
+    edges = band_edges(cfg.surface.tiles)
+    ts = tiling.TileSet.build(cfg)
+    shares = np.array([t.m0() / ts.m0() for t in ts.tiles])
+
+    depth, dx = _wall_scene()
+    th, w = np.array([0.0]), np.array([1.0])
+    scalar = rays.wind_sea_floor(depth, dx, th, w, cfg.wind.fetch)
+    banded = rays.wind_sea_floor(depth, dx, th, w, cfg.wind.fetch, bands=edges,
+                                 u10=cfg.wind.speed, gamma=cfg.spectrum.gamma)
+
+    wet = depth[0] > 0
+    tot = np.tensordot(shares, banded[:, :, wet], axes=(0, 0))
+    worst = float(np.abs(tot - scalar[:, wet]).max())
+    record("5b", "per-band floor vs closed-form total", worst, reference=0.0,
+           tol=2e-3, unit="",
+           note="Sum over bands weighted by their deep-water shares, against "
+                "(F/F_scene)^1.10. The small residual is the variance above the "
+                "top band edge, which the banded form drops and the closed form "
+                "keeps.",
+           passed=worst < 2e-3)
+    assert worst < 2e-3
+
+
+def test_a_sheltered_bay_is_chop_not_scaled_down_swell(record):
+    """A short fetch moves the peak up; it does not shrink the spectrum.
+
+    This is the whole reason one number will not do. At 250 m of fetch the
+    long band is empty and the short band is at half its deep-water energy --
+    a scalar floor puts 82% of that energy in the long band instead, which is
+    the right wave height made of entirely the wrong waves.
+
+    The short band exceeding 1.0 at some fetches is not a bug and is worth
+    pinning: a sheltered cell really does hold more short-wave energy than open
+    water, because the whole spectrum has shifted into that band. A ratio capped
+    at 1 cannot represent it.
+    """
+    from pywave import load_config, rays
+    from pywave.tiling import band_edges
+
+    cfg = load_config(REPO / "configs" / "straits_crop.yaml")
+    edges = band_edges(cfg.surface.tiles)
+    depth, dx = _wall_scene()
+    banded = rays.wind_sea_floor(depth, dx, np.array([0.0]), np.array([1.0]),
+                                 cfg.wind.fetch, bands=edges,
+                                 u10=cfg.wind.speed, gamma=cfg.spectrum.gamma)
+
+    row, col = 20, 6                      # 250 m of fetch at 50 m posts
+    b1, b2, b3 = (float(banded[b, row, col]) for b in range(3))
+    over_one = float(banded[2].max())
+    record("5b", "short-band / long-band floor ratio at 250 m fetch",
+           b3 / max(b1, 1e-12), tol=None, unit="",
+           note=f"bands read {b1:.4f} / {b2:.4f} / {b3:.4f} of their own "
+                f"deep-water energy. The short band peaks at {over_one:.3f} "
+                f"across this scene -- above 1, which the scalar form cannot "
+                f"express.",
+           passed=b3 > b1)
+    assert b3 > b2 > b1, "energy must move UP the bands as fetch shortens"
+    assert over_one > 1.0, "a short-fetch sea outstrips deep water at high k"
+
+
 @pytest.mark.slow
 @has_crop
 def test_5b8_the_solve_is_reproducible(record, crop_rays):

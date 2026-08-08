@@ -66,7 +66,7 @@ import numpy as np
 from .constants import G
 
 __all__ = ["celerity_fields", "launch_line", "trace_rays", "shelter_fetch",
-           "wind_sea_floor", "RayField"]
+           "band_fetch_response", "wind_sea_floor", "RayField"]
 
 
 # ---------------------------------------------------------------------------
@@ -386,8 +386,69 @@ def shelter_fetch(depth, dx, thetas, *, origin=(0.0, 0.0), max_fetch=None,
     return out.reshape(len(thetas), ny, nx)
 
 
+def band_fetch_response(bands, u10, scene_fetch, gamma, *, n_samples: int = 64,
+                        g: float = G):
+    """``m0_band(F) / m0_band(F_scene)`` per band, tabulated on log fetch.
+
+    The scalar floor uses ``(F/F_scene)^1.10``, which is the *total* energy
+    ratio and says nothing about where that energy sits in frequency. That is
+    not a detail. A short fetch does not scale the spectrum down, it **moves the
+    peak up**, so a sheltered bay is short steep chop with no swell in it --
+    not a small copy of the incident swell.
+
+    Measured on the straits crop, as a multiplier on each band's own deep-water
+    energy:
+
+    ==============  ========  ========  ========  ==================
+    local fetch     band 1    band 2    band 3    scalar
+    ==============  ========  ========  ========  ==================
+    2000 m          0.052     1.222     1.125     0.252
+    500 m           0.000     0.023     1.057     0.055
+    200 m           0.000     0.000     0.403     0.020
+    ==============  ========  ========  ========  ==================
+
+    The scalar is wrong in both directions -- 5x too much energy in the long
+    band, 20x too little in the short one -- and note bands 2 and 3 exceeding
+    1.0, which a ratio capped at 1 cannot express at all. A sheltered cell
+    genuinely has *more* short-wave energy than open water, because the whole
+    spectrum shifted into that band.
+
+    What this does **not** change is the total: summed over bands weighted by
+    their deep-water shares, this agrees with ``(F/F_scene)^1.10`` to 4e-4. So
+    gate 5b.3, which is about total height, is indifferent to it. What depends
+    on it is every per-band quantity downstream.
+
+    Returns ``(log_fetch, table)`` with ``table.shape == (len(bands), n_samples)``,
+    ready for :func:`numpy.interp` on ``log(F)``.
+    """
+    from .moments import moment_omega
+    from .spectrum import dispersion_omega
+
+    bands = [(float(lo), float(hi)) for lo, hi in bands]
+    # The shortest fetch worth tabulating is one where the sea is negligible;
+    # below it the table is flat at ~0 and the interpolation clamps.
+    f_lo_fetch = max(float(scene_fetch) * 1e-5, 1e-3)
+    fetches = np.geomspace(f_lo_fetch, float(scene_fetch), int(n_samples))
+
+    def _f_of_k(k):
+        return float(dispersion_omega(np.array(max(k, 1e-12)), None, g)) / (2 * np.pi)
+
+    table = np.zeros((len(bands), len(fetches)))
+    for b, (k_lo, k_hi) in enumerate(bands):
+        lo = _f_of_k(k_lo) if k_lo > 0 else 1e-6
+        hi = _f_of_k(k_hi)
+        ref = moment_omega(0, u10, float(scene_fetch), gamma, f_lo=lo, f_hi=hi, g=g)
+        if ref <= 0:
+            continue
+        for i, f in enumerate(fetches):
+            table[b, i] = moment_omega(0, u10, float(f), gamma,
+                                       f_lo=lo, f_hi=hi, g=g) / ref
+    return np.log(fetches), table
+
+
 def wind_sea_floor(depth, dx, thetas, weights, scene_fetch, *,
-                   origin=(0.0, 0.0), max_fetch=None):
+                   origin=(0.0, 0.0), max_fetch=None,
+                   bands=None, u10=None, gamma=None):
     """Energy a sheltered cell has anyway, relative to the deep-water sea.
 
     Ray theory has no diffraction, so a cell no ray reaches gets exactly zero.
@@ -406,13 +467,38 @@ def wind_sea_floor(depth, dx, thetas, weights, scene_fetch, *,
     hypothetical cell blocked at the full scene fetch in every direction scores
     exactly 1 rather than ``n_dirs``.
 
-    Returns ``(ny, nx)``, in the same units as ``(ray gain)**2``.
+    Pass ``bands`` (with ``u10`` and ``gamma``) to get the floor resolved by
+    spectral band instead of as one number -- see :func:`band_fetch_response`
+    for why one number is not enough. Without it the closed-form total is used,
+    which is right for height and silent about frequency.
+
+    Returns ``(ny, nx)``, or ``(n_bands, ny, nx)`` when ``bands`` is given, in
+    the same units as ``(ray gain)**2`` -- for bands, relative to *that band's*
+    own deep-water energy, which is how ``nearshore.transform`` weights each
+    tile.
     """
     fetch = shelter_fetch(depth, dx, thetas, origin=origin, max_fetch=max_fetch)
-    # A clear direction is `inf`, and contributes nothing.
-    ratio = np.where(np.isfinite(fetch), fetch / float(scene_fetch), 0.0)
-    w = np.asarray(weights, dtype=np.float64)[:, None, None]
-    return np.sum(w * np.minimum(ratio, 1.0) ** _ENERGY_FETCH_EXPONENT, axis=0)
+    blocked = np.isfinite(fetch)          # a clear direction contributes nothing
+    w = np.asarray(weights, dtype=np.float64)
+
+    if bands is None:
+        ratio = np.where(blocked, fetch / float(scene_fetch), 0.0)
+        return np.sum(w[:, None, None]
+                      * np.minimum(ratio, 1.0) ** _ENERGY_FETCH_EXPONENT, axis=0)
+
+    if u10 is None or gamma is None:
+        raise ValueError("bands= needs u10= and gamma= to evaluate the "
+                         "short-fetch spectrum; they cannot be inferred from "
+                         "the bathymetry")
+    log_f, table = band_fetch_response(bands, u10, scene_fetch, gamma)
+    safe = np.clip(np.where(blocked, fetch, 1.0), np.exp(log_f[0]),
+                   float(scene_fetch))
+    log_safe = np.log(safe)
+    out = np.empty((len(table),) + fetch.shape[1:])
+    for b in range(len(table)):
+        r = np.where(blocked, np.interp(log_safe, log_f, table[b]), 0.0)
+        out[b] = np.tensordot(w, r, axes=(0, 0))
+    return out
 
 
 # ---------------------------------------------------------------------------

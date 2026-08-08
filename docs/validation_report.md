@@ -4,12 +4,12 @@
 
 | | |
 |---|---|
-| generated | 2026-08-08 14:58:18 UTC |
-| git_sha | `4431009ed30b25aacc94b83edff71c18d67a1920 (working tree dirty)` |
+| generated | 2026-08-08 15:04:26 UTC |
+| git_sha | `4eaddf102b30da08cd830d59d92de4d479eac5bd (working tree dirty)` |
 | scene | `configs/test_lake.yaml` |
 | python | 3.14.5 (Windows AMD64) |
 | numpy / scipy | 2.5.1 / 1.18.0 |
-| checks recorded | 153 |
+| checks recorded | 155 |
 | exit status | PASS |
 
 Every number below was measured by the test suite against the implementation in this commit. Tolerances are the gate criteria from `littoral-water-implementation-cookbook.md`, except where a deviation is recorded in [Gate deviations](#gate-deviations).
@@ -259,6 +259,8 @@ Notes:
 | fetch growth exponent vs the integrated spectrum | 2.2080e-04 | -- | -- | 1.0e-03 | PASS |
 | shelter fetch to a known wall | 0 m | 0 m | -- | 1.0e-09 | PASS |
 | wind-sea floor on fully exposed water | 0 | 0 | -- | 0.0e+00 | PASS |
+| per-band floor vs closed-form total | 8.4089e-04 | 0 | -- | 2.0e-03 | PASS |
+| short-band / long-band floor ratio at 250 m fetch | 5.1861e+11 | -- | -- | -- | PASS |
 | ray solve is bitwise reproducible | True | True | -- | -- | PASS |
 
 Notes:
@@ -274,6 +276,8 @@ Notes:
 - **fetch growth exponent vs the integrated spectrum** -- Hs/Hs_scene = (F/F_scene)^0.55 over four decades of fetch ratio. The naive sqrt(F) sits 26% high at F/F_scene = 0.01, so it would over-floor sheltered water.
 - **shelter fetch to a known wall** -- 50 cells at 10 m posts; the downwind direction returns inf everywhere (clear = True), which is what stops the floor being applied to open water.
 - **wind-sea floor on fully exposed water** -- Every direction leaves the domain without crossing land, so every direction is already carried by the rays.
+- **per-band floor vs closed-form total** -- Sum over bands weighted by their deep-water shares, against (F/F_scene)^1.10. The small residual is the variance above the top band edge, which the banded form drops and the closed form keeps.
+- **short-band / long-band floor ratio at 250 m fetch** -- bands read 0.0000 / 0.0003 / 0.5186 of their own deep-water energy. The short band peaks at 1.353 across this scene -- above 1, which the scalar form cannot express.
 - **ray solve is bitwise reproducible** -- No RNG, but the energy accumulator is summed in a buffered order; floating-point addition is not associative, so a flush-boundary-dependent order would show up here.
 
 ## Gate 6 -- mesh generation and export
