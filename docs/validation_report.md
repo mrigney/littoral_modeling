@@ -4,12 +4,12 @@
 
 | | |
 |---|---|
-| generated | 2026-08-08 15:04:26 UTC |
-| git_sha | `4eaddf102b30da08cd830d59d92de4d479eac5bd (working tree dirty)` |
+| generated | 2026-08-08 15:12:29 UTC |
+| git_sha | `beeb1ffd8c7063009cbf6650ada533200a14fbb8 (working tree dirty)` |
 | scene | `configs/test_lake.yaml` |
 | python | 3.14.5 (Windows AMD64) |
 | numpy / scipy | 2.5.1 / 1.18.0 |
-| checks recorded | 155 |
+| checks recorded | 159 |
 | exit status | PASS |
 
 Every number below was measured by the test suite against the implementation in this commit. Tolerances are the gate criteria from `littoral-water-implementation-cookbook.md`, except where a deviation is recorded in [Gate deviations](#gate-deviations).
@@ -252,6 +252,10 @@ Notes:
 | ray vs analytic Ks*Kr, straight beach, 0 deg | 1.5286e-04 | -- | -- | 2.0e-02 | PASS |
 | ray vs analytic Ks*Kr, straight beach, 20 deg | 0.004994 | -- | -- | 2.0e-02 | PASS |
 | ray vs analytic Ks*Kr, straight beach, 40 deg | 0.017821 | -- | -- | 2.0e-02 | PASS |
+| ray direction vs Snell, straight beach, 20 deg | 0.016951 deg | -- | -- | 5.0e-01 | PASS |
+| ray direction vs Snell, straight beach, 40 deg | 0.037621 deg | -- | -- | 5.0e-01 | PASS |
+| mean of +179 and -179 degrees | 180 deg | 180 deg | 0.00e+00 | 1.0e-01 | PASS |
+| directionality of two opposed beams | 6.1232e-17 | 0 | -- | 1.0e-09 | PASS |
 | launch reference energy carries cos(alpha) | 0 | -- | -- | 1.0e-12 | PASS |
 | p99.9 gain jump over 4 m of open water | 0.014101 | -- | -- | 2.0e-02 | PASS |
 | median gain over all wet water | 0.999766 | 1 | 2.34e-04 | 2.0e-02 | PASS |
@@ -269,6 +273,10 @@ Notes:
 - **ray vs analytic Ks*Kr, straight beach, 0 deg** -- 200 cells over depths 0.3-4.3 m; median 0.00%. The energy-accumulation solver is not given the closed form anywhere -- it integrates rays through the celerity field and counts what arrives.
 - **ray vs analytic Ks*Kr, straight beach, 20 deg** -- 200 cells over depths 0.3-4.3 m; median 0.05%. The energy-accumulation solver is not given the closed form anywhere -- it integrates rays through the celerity field and counts what arrives.
 - **ray vs analytic Ks*Kr, straight beach, 40 deg** -- 200 cells over depths 0.3-4.3 m; median 0.13%. The energy-accumulation solver is not given the closed form anywhere -- it integrates rays through the celerity field and counts what arrives.
+- **ray direction vs Snell, straight beach, 20 deg** -- 200 cells; median 0.012 deg. The rays turn 13.6 deg across this band, so the tolerance is 3.7% of the effect being measured, not of the angle itself.
+- **ray direction vs Snell, straight beach, 40 deg** -- 200 cells; median 0.025 deg. The rays turn 27.5 deg across this band, so the tolerance is 1.8% of the effect being measured, not of the angle itself.
+- **mean of +179 and -179 degrees** -- The arithmetic mean of the two angles is 0 deg, pointing the sea the other way. Directionality here is 0.9998 -- near 1, correctly reporting that these rays do agree.
+- **directionality of two opposed beams** -- Equal energy from opposite directions cancels to 0, so the mean direction is reported as untrustworthy rather than silently returned as a plausible angle.
 - **launch reference energy carries cos(alpha)** -- e_ref must scale as 1/cos(alpha) with obliquity.
 - **p99.9 gain jump over 4 m of open water** -- 9.2M sampled pairs on the 701 m straits crop; p99 0.0067, worst 0.0269. Against 0.8819 for `snell` and 0.3001 for `blend` on the full export. The deposition kernel is sigma = 80 m, an empirical noise control rather than a derived length -- see the approximations note in docs/phase5b_refraction.md.
 - **median gain over all wet water** -- Not imposed: the normalisation is taken on the deepest 5% only. A launch-spacing or per-ray-power error biases this away from 1 while leaving the field's shape intact.

@@ -143,6 +143,48 @@ def launch_line(x_from, x_to, y, theta, n_rays, omega, depth_at_launch):
     return x0, y0, th0, float(e_ref)
 
 
+@dataclass
+class RayAccumulator:
+    """What a ray sweep leaves behind on the grid.
+
+    A record rather than a tuple because the direction moments are meaningless
+    on their own -- ``e_cos`` and ``e_sin`` are only ever read through
+    :attr:`theta`, and a caller unpacking four bare arrays would have to know
+    that.
+    """
+
+    energy: np.ndarray
+    """Accumulated energy density, arbitrary units."""
+    hits: np.ndarray
+    """Ray-visit count. Low means a noisy answer; diagnostic only."""
+    e_cos: np.ndarray
+    """Energy-weighted sum of ``cos(theta)``."""
+    e_sin: np.ndarray
+    """Energy-weighted sum of ``sin(theta)``."""
+
+    @property
+    def theta(self) -> np.ndarray:
+        """Energy-weighted mean direction of travel [rad], CCW from +X.
+
+        ``atan2`` of the summed components, which is the circular mean. Not the
+        mean of the angles: rays at +179 and -179 degrees travel almost the same
+        way and their arithmetic mean points backwards.
+        """
+        return np.arctan2(self.e_sin, self.e_cos)
+
+    @property
+    def directionality(self) -> np.ndarray:
+        """``|sum of unit vectors| / sum of weights``, in ``[0, 1]``.
+
+        1 where every ray through a cell travels the same way, 0 where they
+        cancel. It is the honest companion to :attr:`theta`: in a cell fed from
+        two directions at once the mean direction is a real number and a poor
+        description, and only this says so.
+        """
+        mag = np.hypot(self.e_cos, self.e_sin)
+        return np.where(self.energy > 0, mag / np.maximum(self.energy, 1e-30), 0.0)
+
+
 def trace_rays(depth, omega, dx, x0, y0, theta0, *, origin=(0.0, 0.0),
                power=None, ds=None, max_steps=None, break_depth=0.0,
                min_depth=0.05, wrap_x=False):
@@ -173,8 +215,8 @@ def trace_rays(depth, omega, dx, x0, y0, theta0, *, origin=(0.0, 0.0),
 
     Returns
     -------
-    ``(energy, hits)`` -- accumulated energy density and a ray-visit count, both
-    on the bathymetry grid. ``hits`` is diagnostic: cells with few visits have a
+    A :class:`RayAccumulator` carrying energy density, a ray-visit count, and
+    the direction moments. ``hits`` is diagnostic: cells with few visits have a
     noisy answer and the caller should say so rather than pretend otherwise.
     """
     depth = np.asarray(depth, dtype=np.float64)
@@ -201,12 +243,21 @@ def trace_rays(depth, omega, dx, x0, y0, theta0, *, origin=(0.0, 0.0),
 
     energy = np.zeros(ny * nx, dtype=np.float64)
     hits = np.zeros(ny * nx, dtype=np.float64)
+    # Energy-weighted direction, accumulated as its two components rather than
+    # as an angle. Averaging angles directly is wrong at the branch cut -- rays
+    # at +179 and -179 degrees are travelling almost the same way and average to
+    # 0, which points them backwards. Summing the unit vectors and taking atan2
+    # at the end has no branch cut and weights by energy for free.
+    e_cos = np.zeros(ny * nx, dtype=np.float64)
+    e_sin = np.zeros(ny * nx, dtype=np.float64)
     ox, oy = origin
     area = dx * dx
 
     buf_idx: list = []
     buf_e: list = []
     buf_h: list = []
+    buf_c: list = []
+    buf_s: list = []
     buffered = 0
     flush_every = 8_000_000
 
@@ -215,11 +266,12 @@ def trace_rays(depth, omega, dx, x0, y0, theta0, *, origin=(0.0, 0.0),
         if not buf_idx:
             return
         idx = np.concatenate(buf_idx)
-        energy[:] += np.bincount(idx, weights=np.concatenate(buf_e),
-                                 minlength=ny * nx)
-        hits[:] += np.bincount(idx, weights=np.concatenate(buf_h),
-                               minlength=ny * nx)
+        for acc, buf in ((energy, buf_e), (hits, buf_h),
+                         (e_cos, buf_c), (e_sin, buf_s)):
+            acc[:] += np.bincount(idx, weights=np.concatenate(buf),
+                                  minlength=ny * nx)
         buf_idx.clear(); buf_e.clear(); buf_h.clear()
+        buf_c.clear(); buf_s.clear()
         buffered = 0
 
     def grid_coords(xx, yy):
@@ -254,11 +306,15 @@ def trace_rays(depth, omega, dx, x0, y0, theta0, *, origin=(0.0, 0.0),
         fx = np.clip(gx - ix, 0.0, 1.0)
         fy = np.clip(gy - iy, 0.0, 1.0)
         base = iy * nx + ix
+        w_cos = w * np.cos(tha)
+        w_sin = w * np.sin(tha)
         for off, wt in ((0, (1 - fx) * (1 - fy)), (1, fx * (1 - fy)),
                         (nx, (1 - fx) * fy), (nx + 1, fx * fy)):
             buf_idx.append(base + off)
             buf_e.append(w * wt)
             buf_h.append(wt * in_now)
+            buf_c.append(w_cos * wt)
+            buf_s.append(w_sin * wt)
         buffered += 4 * gx.size
         if buffered >= flush_every:
             _flush()
@@ -296,7 +352,10 @@ def trace_rays(depth, omega, dx, x0, y0, theta0, *, origin=(0.0, 0.0),
         alive[idx_alive[~still]] = False
 
     _flush()
-    return energy.reshape(ny, nx), hits.reshape(ny, nx)
+    return RayAccumulator(energy=energy.reshape(ny, nx),
+                          hits=hits.reshape(ny, nx),
+                          e_cos=e_cos.reshape(ny, nx),
+                          e_sin=e_sin.reshape(ny, nx))
 
 
 # ---------------------------------------------------------------------------
@@ -519,6 +578,21 @@ class RayField:
     """``(ny, nx)`` amplitude gain, 1.0 in deep water."""
     hits: np.ndarray
     """``(ny, nx)`` ray-visit density. Low counts mean a noisy answer."""
+    theta: np.ndarray
+    """``(ny, nx)`` energy-weighted mean direction of travel [rad], CCW from +X.
+
+    What ``nearshore.transform`` needs to rotate each tile by, and the half of
+    refraction that ``gain`` does not carry: a wave can turn without changing
+    height, and on a mild slope at normal incidence it mostly does.
+    """
+    directionality: np.ndarray
+    """``(ny, nx)`` in ``[0, 1]``: how uni-directional the sea is at that cell.
+
+    1 where every ray agrees, 0 where they cancel. Read it before trusting
+    :attr:`theta` -- behind a headland, energy arrives from both sides of the
+    obstacle at once, and a mean direction there is a real number describing a
+    sea that has no single direction.
+    """
     omega: float
     meta: dict = field(default_factory=dict)
 
@@ -593,6 +667,8 @@ class RayField:
 
         energy = np.zeros((ny, nx))
         hits = np.zeros((ny, nx))
+        e_cos = np.zeros((ny, nx))
+        e_sin = np.zeros((ny, nx))
         for theta, weight in zip(th_w + rel, w):
             if weight <= 0:
                 continue
@@ -608,13 +684,17 @@ class RayField:
             ys = start * fwd[1] + s0 * perp[1]
 
             spacing = (s0[-1] - s0[0]) / max(rays_per_dir - 1, 1)
-            e, h = trace_rays(depth, omega, dx,
-                              xs, ys, np.full(rays_per_dir, theta),
-                              origin=(x0g, y0g),
-                              power=np.full(rays_per_dir, weight * spacing),
-                              ds=ds, break_depth=break_depth)
-            energy += e
-            hits += h
+            acc = trace_rays(depth, omega, dx,
+                             xs, ys, np.full(rays_per_dir, theta),
+                             origin=(x0g, y0g),
+                             power=np.full(rays_per_dir, weight * spacing),
+                             ds=ds, break_depth=break_depth)
+            energy += acc.energy
+            hits += acc.hits
+            # Summed across the fan before any angle is taken, so the mean
+            # direction is over the whole directional sea rather than per beam.
+            e_cos += acc.e_cos
+            e_sin += acc.e_sin
 
         # Normalise on deep water, where by construction nothing has refracted
         # yet and the gain must be exactly 1. Doing it empirically rather than
@@ -666,6 +746,19 @@ class RayField:
         gain = np.sqrt(e_gain)
         gain = np.where(wet, gain, 0.0)
 
+        # Smooth the direction as its two components, for the same reason they
+        # are accumulated that way: a Gaussian over an angle field averages
+        # across the branch cut and produces directions no ray ever travelled.
+        if smooth_m:
+            e_cos, e_sin = _smooth_wet(e_cos), _smooth_wet(e_sin)
+        mag = np.hypot(e_cos, e_sin)
+        directionality = np.where(wet & (energy > 0),
+                                  mag / np.maximum(energy, 1e-30), 0.0)
+        # Carried as a unit vector rather than an angle all the way through the
+        # upsample below, for the same branch-cut reason.
+        u = np.where(mag > 0, e_cos / np.maximum(mag, 1e-30), 1.0)
+        v = np.where(mag > 0, e_sin / np.maximum(mag, 1e-30), 0.0)
+
         thin = int((wet & (hits < min_hits)).sum())
         visits = float(hits[wet].mean()) if wet.any() else 0.0
         if dec > 1:
@@ -683,13 +776,20 @@ class RayField:
             # a normalised zoom would do is 0/0 exactly where the fill matters.
             src = distance_transform_edt(~wet, return_distances=False,
                                          return_indices=True)
-            gain = zoom(gain[tuple(src)], (full_shape[0] / ny, full_shape[1] / nx),
-                        order=1)
-            hits = zoom(hits, (full_shape[0] / ny, full_shape[1] / nx), order=0)
-            gain = np.where(full_depth > 0.0, gain[:full_shape[0], :full_shape[1]], 0.0)
-            hits = hits[:full_shape[0], :full_shape[1]]
+            zf = (full_shape[0] / ny, full_shape[1] / nx)
+            crop = (slice(0, full_shape[0]), slice(0, full_shape[1]))
+            gain, u, v, directionality = (
+                zoom(f[tuple(src)], zf, order=1)[crop]
+                for f in (gain, u, v, directionality))
+            hits = zoom(hits, zf, order=0)[crop]
+            full_wet = full_depth > 0.0
+            gain = np.where(full_wet, gain, 0.0)
+            directionality = np.where(full_wet, directionality, 0.0)
 
-        return cls(gain=gain, hits=hits, omega=float(omega),
+        theta = np.arctan2(v, u)
+
+        return cls(gain=gain, hits=hits, theta=theta,
+                   directionality=directionality, omega=float(omega),
                    meta={"n_dirs": int(n_dirs), "rays_per_dir": int(rays_per_dir),
                          "spread_deg": float(spread_deg), "ds": float(ds),
                          "d_ref": d_ref, "break_depth": float(break_depth),
@@ -701,8 +801,15 @@ class RayField:
                          "sheltered_cells": int(np.sum(wet & (np.asarray(floor_e)
                                                               > 0.0)))})
 
-    def sample(self, bathy, x, y) -> np.ndarray:
-        """Gain at arbitrary scene coordinates."""
+    def sample(self, bathy, x, y):
+        """``(gain, theta)`` at arbitrary scene coordinates.
+
+        The direction is interpolated as a unit vector and recombined with
+        ``atan2``, not interpolated as an angle -- halfway between +179 and
+        -179 degrees is 180, not 0.
+        """
         gx = (np.asarray(x, dtype=np.float64) - bathy.meta.extent[0]) / bathy.meta.dx
         gy = (np.asarray(y, dtype=np.float64) - bathy.meta.extent[2]) / bathy.meta.dx
-        return _bilinear(self.gain, gx, gy)
+        u = _bilinear(np.cos(self.theta), gx, gy)
+        v = _bilinear(np.sin(self.theta), gx, gy)
+        return _bilinear(self.gain, gx, gy), np.arctan2(v, u)

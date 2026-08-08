@@ -124,9 +124,9 @@ def test_5b1_straight_beach_reproduces_snell(record, alpha_deg):
 
     x0, y0, th0, e_ref = rays.launch_line(
         0.0, nx * dx, (ny - 1.5) * dx, -np.pi / 2 + alpha0, 6000, omega, d_deep)
-    energy, _ = rays.trace_rays(depth, omega, dx, x0, y0, th0,
-                                ds=0.25 * dx, break_depth=0.05, wrap_x=True)
-    gain = np.sqrt(np.maximum(energy, 0.0) / e_ref)[:, nx // 2]
+    acc = rays.trace_rays(depth, omega, dx, x0, y0, th0,
+                          ds=0.25 * dx, break_depth=0.05, wrap_x=True)
+    gain = np.sqrt(np.maximum(acc.energy, 0.0) / e_ref)[:, nx // 2]
 
     prof = depth[:, nx // 2]
     want = _analytic_gain(prof, omega, d_deep, alpha0)
@@ -142,6 +142,104 @@ def test_5b1_straight_beach_reproduces_snell(record, alpha_deg):
                 f"rays through the celerity field and counts what arrives.",
            passed=worst < 0.02)
     assert worst < 0.02, f"worst relative error {100 * worst:.2f}%"
+
+
+@pytest.mark.parametrize("alpha_deg", [20.0, 40.0])
+def test_5b1c_ray_direction_reproduces_snells_angle(record, alpha_deg):
+    """Gain is only half of refraction; the other half is which way it points.
+
+    A wave can turn without changing height, and on a mild slope at normal
+    incidence it mostly does -- so a solver validated on `Ks*Kr` alone could be
+    turning the waves any way at all and still pass 5b.1. This is the same
+    planar beach, checking the direction the energy actually travels against
+    Snell's law solved on the full dispersion relation.
+
+    `nearshore.transform` rotates each tile by this angle, so an error here is
+    a surface whose waves run across the beach instead of into it.
+    """
+    from pywave import rays
+    from pywave.spectrum import dispersion_k
+
+    depth, dx = _planar_beach()
+    ny, nx = depth.shape
+    d_deep = depth.max()
+    omega = 2 * np.pi / 6.0
+    alpha0 = np.radians(alpha_deg)
+
+    x0, y0, th0, _ = rays.launch_line(
+        0.0, nx * dx, (ny - 1.5) * dx, -np.pi / 2 + alpha0, 6000, omega, d_deep)
+    acc = rays.trace_rays(depth, omega, dx, x0, y0, th0,
+                          ds=0.25 * dx, break_depth=0.05, wrap_x=True)
+
+    prof = depth[:, nx // 2]
+    c = omega / dispersion_k(omega, np.maximum(prof, 1e-6))
+    c_deep = omega / dispersion_k(omega, d_deep)
+    want = -np.pi / 2 + np.arcsin(np.clip(np.sin(alpha0) * c / c_deep, -1.0, 1.0))
+    got = acc.theta[:, nx // 2]
+
+    band = (prof > 0.3) & (prof < 0.9 * d_deep)
+    err = np.degrees(np.abs(np.angle(np.exp(1j * (got[band] - want[band])))))
+    worst = float(err.max())
+    turn = np.degrees(want[band].max() - want[band].min())
+    record("5b", f"ray direction vs Snell, straight beach, {alpha_deg:g} deg",
+           worst, tol=0.5, unit="deg",
+           note=f"{int(band.sum())} cells; median {np.median(err):.3f} deg. The "
+                f"rays turn {turn:.1f} deg across this band, so the tolerance is "
+                f"{100 * 0.5 / max(turn, 1e-9):.1f}% of the effect being "
+                f"measured, not of the angle itself.",
+           passed=worst < 0.5)
+    assert worst < 0.5, f"worst direction error {worst:.3f} deg"
+
+
+def test_mean_direction_survives_the_branch_cut(record):
+    """Rays at +179 and -179 degrees travel nearly the same way.
+
+    Averaging their angles gives 0 -- exactly backwards. The accumulator sums
+    unit vectors instead, so this is a property of the representation rather
+    than a special case, and it is pinned because the failure is silent: a
+    direction field that is wrong only near the cut looks fine everywhere else.
+    """
+    from pywave import rays
+
+    a, b = np.radians(179.0), np.radians(-179.0)
+    acc = rays.RayAccumulator(
+        energy=np.array([[2.0]]), hits=np.array([[2.0]]),
+        e_cos=np.array([[np.cos(a) + np.cos(b)]]),
+        e_sin=np.array([[np.sin(a) + np.sin(b)]]))
+    got = float(np.degrees(acc.theta[0, 0]))
+    err = abs(abs(got) - 180.0)
+    record("5b", "mean of +179 and -179 degrees", abs(got), reference=180.0,
+           tol=0.1, unit="deg",
+           note=f"The arithmetic mean of the two angles is 0 deg, pointing the "
+                f"sea the other way. Directionality here is "
+                f"{float(acc.directionality[0, 0]):.4f} -- near 1, correctly "
+                f"reporting that these rays do agree.",
+           passed=err < 0.1)
+    assert err < 0.1
+    assert float(acc.directionality[0, 0]) > 0.999
+
+
+def test_directionality_reports_when_a_mean_direction_is_meaningless(record):
+    """Two beams meeting head-on have a mean direction and no direction.
+
+    `theta` is always a number. Behind a headland, energy arrives round both
+    sides at once and that number describes nothing. `directionality` is what
+    distinguishes the two cases, and without it a caller has no way to tell.
+    """
+    from pywave import rays
+
+    opposed = rays.RayAccumulator(
+        energy=np.array([[2.0]]), hits=np.array([[2.0]]),
+        e_cos=np.array([[np.cos(0.0) + np.cos(np.pi)]]),
+        e_sin=np.array([[np.sin(0.0) + np.sin(np.pi)]]))
+    d = float(opposed.directionality[0, 0])
+    record("5b", "directionality of two opposed beams", d, reference=0.0,
+           tol=1e-9, unit="",
+           note="Equal energy from opposite directions cancels to 0, so the "
+                "mean direction is reported as untrustworthy rather than "
+                "silently returned as a plausible angle.",
+           passed=d < 1e-9)
+    assert d < 1e-9
 
 
 def test_5b1b_launch_normalisation_carries_the_obliquity_cosine(record):
