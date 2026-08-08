@@ -190,11 +190,36 @@ def trace_rays(depth, omega, dx, x0, y0, theta0, *, origin=(0.0, 0.0),
     p = (np.ones_like(x) if power is None
          else np.asarray(power, dtype=np.float64).copy())
     alive = np.ones(x.shape, dtype=bool)
+    # Rays are usually launched *outside* the grid so they arrive with the
+    # right direction and spacing rather than being born on the boundary. They
+    # must therefore be allowed to fly in: a ray is retired when it has been
+    # inside and then left, not merely for being outside. Without this
+    # distinction every ray dies on its first step and the field comes back
+    # empty -- measured once at 99.88% of wet cells never visited.
+    entered = np.zeros(x.shape, dtype=bool)
 
-    energy = np.zeros_like(depth)
-    hits = np.zeros_like(depth)
+    energy = np.zeros(ny * nx, dtype=np.float64)
+    hits = np.zeros(ny * nx, dtype=np.float64)
     ox, oy = origin
     area = dx * dx
+
+    buf_idx: list = []
+    buf_e: list = []
+    buf_h: list = []
+    buffered = 0
+    flush_every = 8_000_000
+
+    def _flush():
+        nonlocal buffered
+        if not buf_idx:
+            return
+        idx = np.concatenate(buf_idx)
+        energy[:] += np.bincount(idx, weights=np.concatenate(buf_e),
+                                 minlength=ny * nx)
+        hits[:] += np.bincount(idx, weights=np.concatenate(buf_h),
+                               minlength=ny * nx)
+        buf_idx.clear(); buf_e.clear(); buf_h.clear()
+        buffered = 0
 
     def grid_coords(xx, yy):
         return (xx - ox) / dx, (yy - oy) / dx
@@ -202,8 +227,11 @@ def trace_rays(depth, omega, dx, x0, y0, theta0, *, origin=(0.0, 0.0),
     for _ in range(max_steps):
         if not alive.any():
             break
+        idx_alive = np.flatnonzero(alive)
         xa, ya, tha = x[alive], y[alive], th[alive]
         gx, gy = grid_coords(xa, ya)
+        in_now = (gx >= 0) & (gx <= nx - 1) & (gy >= 0) & (gy <= ny - 1)
+        entered[idx_alive] |= in_now
 
         c_r = _bilinear(c, gx, gy)
         cg_r = _bilinear(cg, gx, gy)
@@ -213,15 +241,26 @@ def trace_rays(depth, omega, dx, x0, y0, theta0, *, origin=(0.0, 0.0),
         # Deposit before stepping, so a ray contributes to the cell it is in.
         # Bilinear scatter rather than nearest-cell: with nearest-cell the
         # accumulator inherits the ray-launch pattern as visible striping.
-        w = p[alive] * ds / (np.maximum(cg_r, 1e-9) * area)
+        #
+        # Buffered, because the scatter is the whole cost of the solve. Measured
+        # on a 2150x1874 grid: np.add.at runs at 495 ns/entry on the ~40k entries
+        # one step produces, while np.bincount over a batched 8M entries runs at
+        # 27 ns. Same arithmetic, 18x apart -- the per-call overhead of touching
+        # a 4M-cell accumulator simply has to be amortised.
+        w = p[alive] * ds / (np.maximum(cg_r, 1e-9) * area) * in_now
         ix = np.clip(np.floor(gx).astype(np.int64), 0, nx - 2)
         iy = np.clip(np.floor(gy).astype(np.int64), 0, ny - 2)
         fx = np.clip(gx - ix, 0.0, 1.0)
         fy = np.clip(gy - iy, 0.0, 1.0)
-        for jy, jx, wt in ((0, 0, (1 - fx) * (1 - fy)), (0, 1, fx * (1 - fy)),
-                           (1, 0, (1 - fx) * fy), (1, 1, fx * fy)):
-            np.add.at(energy, (iy + jy, ix + jx), w * wt)
-            np.add.at(hits, (iy + jy, ix + jx), wt)
+        base = iy * nx + ix
+        for off, wt in ((0, (1 - fx) * (1 - fy)), (1, fx * (1 - fy)),
+                        (nx, (1 - fx) * fy), (nx + 1, fx * fy)):
+            buf_idx.append(base + off)
+            buf_e.append(w * wt)
+            buf_h.append(wt * in_now)
+        buffered += 4 * gx.size
+        if buffered >= flush_every:
+            _flush()
 
         # Midpoint (RK2). Refraction turns rays through large angles over a few
         # cells near a headland, and forward Euler visibly cuts those corners.
@@ -247,10 +286,180 @@ def trace_rays(depth, omega, dx, x0, y0, theta0, *, origin=(0.0, 0.0),
         inside = (gy2 >= 0) & (gy2 <= ny - 1)
         if not wrap_x:
             inside &= (gx2 >= 0) & (gx2 <= nx - 1)
-        deep_enough = _bilinear(depth, np.clip(gx2, 0, nx - 1),
-                                np.clip(gy2, 0, ny - 1)) > break_depth
-        still = inside & deep_enough
-        idx = np.flatnonzero(alive)
-        alive[idx[~still]] = False
+        d_here = _bilinear(depth, np.clip(gx2, 0, nx - 1),
+                           np.clip(gy2, 0, ny - 1))
+        was_in = entered[idx_alive]
+        # Retire on running aground, or on leaving after having arrived. A ray
+        # still on its way in is neither.
+        still = np.where(was_in, inside & (d_here > break_depth), True)
+        alive[idx_alive[~still]] = False
 
-    return energy, hits
+    _flush()
+    return energy.reshape(ny, nx), hits.reshape(ny, nx)
+
+
+# ---------------------------------------------------------------------------
+# The scene-level solve
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class RayField:
+    """Refraction and shoaling gain over a whole bathymetry, from ray density.
+
+    A scene-level artifact, like the foam spin-up: the wave field is
+    **stationary** given a bed and a sea state, so this is solved once and then
+    sampled per frame. Per-frame cost is a bilinear interpolation.
+    """
+
+    gain: np.ndarray
+    """``(ny, nx)`` amplitude gain, 1.0 in deep water."""
+    hits: np.ndarray
+    """``(ny, nx)`` ray-visit density. Low counts mean a noisy answer."""
+    omega: float
+    meta: dict = field(default_factory=dict)
+
+    @classmethod
+    def solve(cls, bathy, cfg, omega: float, *, n_dirs: int = 21,
+              rays_per_dir: int = 3000, spread_deg: float = 90.0,
+              ds_frac: float = 0.5, break_depth: float = 0.05,
+              min_hits: float = 1.0, decimate: int = 1,
+              smooth_m: float | None = None) -> "RayField":
+        """Integrate a directional wave field across the bathymetry.
+
+        A single beam would give hard geometric shadows behind every headland --
+        ray theory has no diffraction, so a sheltered cell gets exactly zero.
+        Launching a **fan** weighted by the spreading function is not a
+        refinement bolted on afterwards; it is what makes shadow zones physical,
+        because a real sea arrives from a range of directions and the edges of
+        that range reach in behind obstacles.
+
+        Rays enter from a line upwind of the whole domain, perpendicular to their
+        own direction, so deep water is seeded uniformly whatever the geometry.
+
+        ``decimate`` and ``smooth_m`` exist because energy deposition is Monte
+        Carlo, and Monte Carlo on a fine grid is shot noise. Both are physical
+        rather than cosmetic:
+
+        * The gain field varies over the **bathymetry's** length scale --
+          hundreds of metres -- not the mesh's. Solving on a coarser grid and
+          interpolating loses nothing real, and gives ``decimate**2`` times more
+          ray visits per cell.
+        * A ray is a wave *packet*, not a line. Energy cannot be localised finer
+          than about a wavelength, so a deposition kernel of that width is more
+          correct than a point, not less.
+
+        Measured on a 4 m Strait of Hormuz export at the defaults: 47 ray visits
+        per cell, giving 7.3% gain noise and a p99.9 one-cell jump of 0.753 --
+        which is sampling, not water. Reaching Gate 5b.2 by ray count alone would
+        need 27x more sampling and about seven hours.
+        """
+        from scipy.ndimage import distance_transform_edt, gaussian_filter, zoom
+
+        from .moments import spreading
+
+        full_depth = np.asarray(bathy.depth, dtype=np.float64)
+        full_shape = full_depth.shape
+        dec = max(int(decimate), 1)
+        depth = full_depth[::dec, ::dec] if dec > 1 else full_depth
+        ny, nx = depth.shape
+        dx = float(bathy.meta.dx) * dec
+        x0g, y0g = bathy.meta.extent[0], bathy.meta.extent[2]
+        ds = ds_frac * dx
+
+        # Directions, weighted by how much energy the sea actually sends each way.
+        half = np.radians(spread_deg)
+        rel = np.linspace(-half, half, n_dirs)
+        th_w = cfg.wind.direction_rad
+        d_theta = rel[1] - rel[0] if n_dirs > 1 else 2 * half
+        w = spreading(th_w + rel, np.full(n_dirs, cfg.f_p), cfg.f_p, th_w,
+                      model=cfg.spectrum.spreading)
+        w = np.asarray(w, dtype=np.float64) * d_theta
+        w = w / w.sum()
+
+        corners = np.array([[x0g, y0g], [x0g + nx * dx, y0g],
+                            [x0g, y0g + ny * dx], [x0g + nx * dx, y0g + ny * dx]])
+        d_ref = float(np.percentile(depth[depth > 0], 95))
+
+        energy = np.zeros((ny, nx))
+        hits = np.zeros((ny, nx))
+        for theta, weight in zip(th_w + rel, w):
+            if weight <= 0:
+                continue
+            fwd = np.array([np.cos(theta), np.sin(theta)])
+            perp = np.array([-np.sin(theta), np.cos(theta)])
+            # Span the domain's shadow on the perpendicular, and start behind it.
+            a = corners @ perp
+            b = corners @ fwd
+            pad = 2.0 * dx
+            s0 = np.linspace(a.min() - pad, a.max() + pad, rays_per_dir)
+            start = b.min() - pad
+            xs = start * fwd[0] + s0 * perp[0]
+            ys = start * fwd[1] + s0 * perp[1]
+
+            spacing = (s0[-1] - s0[0]) / max(rays_per_dir - 1, 1)
+            e, h = trace_rays(depth, omega, dx,
+                              xs, ys, np.full(rays_per_dir, theta),
+                              origin=(x0g, y0g),
+                              power=np.full(rays_per_dir, weight * spacing),
+                              ds=ds, break_depth=break_depth)
+            energy += e
+            hits += h
+
+        # Normalise on deep water, where by construction nothing has refracted
+        # yet and the gain must be exactly 1. Doing it empirically rather than
+        # analytically also absorbs the discretisation of the fan.
+        wet = depth > 0.0
+
+        # Smooth the ENERGY, not the gain: energy is what the rays sampled and
+        # is the quantity whose noise is Poisson. Normalise by a smoothed wet
+        # mask so the shoreline does not bleed dry cells inward.
+        if smooth_m:
+            sig = float(smooth_m) / dx
+            num = gaussian_filter(np.where(wet, energy, 0.0), sig, mode="nearest")
+            den = gaussian_filter(wet.astype(np.float64), sig, mode="nearest")
+            energy = np.where(den > 1e-6, num / np.maximum(den, 1e-6), energy)
+
+        deep = wet & (depth >= d_ref)
+        ref = float(np.median(energy[deep])) if deep.sum() > 50 else \
+            float(np.median(energy[wet]))
+        gain = np.sqrt(np.maximum(energy, 0.0) / max(ref, 1e-30))
+        gain = np.where(wet, gain, 0.0)
+
+        thin = int((wet & (hits < min_hits)).sum())
+        visits = float(hits[wet].mean()) if wet.any() else 0.0
+        if dec > 1:
+            # Extend the gain into the dry cells before upsampling. Bilinear
+            # interpolation mixes neighbours, so leaving the zeros there drags
+            # them into the water within one *coarse* cell of every shoreline --
+            # a seam that has nothing to do with the wave field and that no
+            # amount of smoothing removes, because it is created after the
+            # smoothing. Measured on the straits crop at decimate=16: every one
+            # of the worst 0.1% of 4 m gain jumps sat inside that 4 m band, and
+            # p99.9 fell from 0.396 to 0.026 when they stopped being generated.
+            #
+            # Nearest-wet fill rather than a normalised zoom: water thinner than
+            # a coarse cell has no wet coarse neighbour at all, so the division
+            # a normalised zoom would do is 0/0 exactly where the fill matters.
+            src = distance_transform_edt(~wet, return_distances=False,
+                                         return_indices=True)
+            gain = zoom(gain[tuple(src)], (full_shape[0] / ny, full_shape[1] / nx),
+                        order=1)
+            hits = zoom(hits, (full_shape[0] / ny, full_shape[1] / nx), order=0)
+            gain = np.where(full_depth > 0.0, gain[:full_shape[0], :full_shape[1]], 0.0)
+            hits = hits[:full_shape[0], :full_shape[1]]
+
+        return cls(gain=gain, hits=hits, omega=float(omega),
+                   meta={"n_dirs": int(n_dirs), "rays_per_dir": int(rays_per_dir),
+                         "spread_deg": float(spread_deg), "ds": float(ds),
+                         "d_ref": d_ref, "break_depth": float(break_depth),
+                         "decimate": dec, "solve_dx": dx,
+                         "smooth_m": float(smooth_m or 0.0),
+                         "mean_visits": visits, "thin_cells": thin,
+                         "wet_cells": int(wet.sum())})
+
+    def sample(self, bathy, x, y) -> np.ndarray:
+        """Gain at arbitrary scene coordinates."""
+        gx = (np.asarray(x, dtype=np.float64) - bathy.meta.extent[0]) / bathy.meta.dx
+        gy = (np.asarray(y, dtype=np.float64) - bathy.meta.extent[2]) / bathy.meta.dx
+        return _bilinear(self.gain, gx, gy)

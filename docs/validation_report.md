@@ -4,12 +4,12 @@
 
 | | |
 |---|---|
-| generated | 2026-08-07 12:27:38 UTC |
-| git_sha | `885b1bcb0394d3bd9186af27a2b0deb402440293 (working tree dirty)` |
+| generated | 2026-08-08 03:58:03 UTC |
+| git_sha | `3ba40fa5c2d50c892fb0fd0f92493950843ee030 (working tree dirty)` |
 | scene | `configs/test_lake.yaml` |
 | python | 3.14.5 (Windows AMD64) |
 | numpy / scipy | 2.5.1 / 1.18.0 |
-| checks recorded | 144 |
+| checks recorded | 148 |
 | exit status | PASS |
 
 Every number below was measured by the test suite against the implementation in this commit. Tolerances are the gate criteria from `littoral-water-implementation-cookbook.md`, except where a deviation is recorded in [Gate deviations](#gate-deviations).
@@ -27,7 +27,7 @@ Every number below was measured by the test suite against the implementation in 
 | f_p from argmax of S(f) | 0.95675 Hz | 0.956834 Hz | 8.75e-05 | 2.0e-02 | PASS |
 | T_p | 1.0451 s | -- | -- | -- | PASS |
 | lambda_p (deep water) | 1.7054 m | -- | -- | -- | PASS |
-| max |int D dtheta - 1| over f/f_p in [0.125, 100] | 2.4425e-15 | 0 | -- | 1.0e-06 | PASS |
+| max \|int D dtheta - 1\| over f/f_p in [0.125, 100] | 2.4425e-15 | 0 | -- | 1.0e-06 | PASS |
 | max rel. difference, spreading_norm closed vs quad | 2.0562e-11 | 0 | -- | 1.0e-10 | PASS |
 | m0 from int S(k) d2k (2-D polar, via jonswap_sk) | 4.5890e-04 m^2 | 4.5890e-04 m^2 | 1.30e-06 | 1.0e-02 | PASS |
 | Hs from the wavenumber integral | 0.085688 m | 0.085688 m | 6.49e-07 | 1.0e-02 | PASS |
@@ -72,7 +72,7 @@ Notes:
 
 | Check | Measured | Reference | Rel. error | Tolerance | Result |
 |---|---|---|---|---|---|
-| max |imag(h)| over all tiles, t = 0 and 3.7 s | 1.6766e-17 m | 0 m | -- | 1.0e-09 | PASS |
+| max \|imag(h)\| over all tiles, t = 0 and 3.7 s | 1.6766e-17 m | 0 m | -- | 1.0e-09 | PASS |
 | Hs realised, single tile L=128 m N=1024 | 0.08523 m | 0.084943 m | 3.38e-03 | 5.0e-02 | PASS |
 | Hs realised vs untruncated spectral Hs | 0.08523 m | 0.085688 m | 5.35e-03 | 5.0e-02 | PASS |
 | Hs realised, 3-tile composite | 0.084178 m | 0.085303 m | 1.32e-02 | 5.0e-02 | PASS |
@@ -116,13 +116,13 @@ Notes:
 
 | Check | Measured | Reference | Rel. error | Tolerance | Result |
 |---|---|---|---|---|---|
-| max |difference| between two builds at the same seed | 0 | 0 | -- | 0.0e+00 | PASS |
+| max \|difference\| between two builds at the same seed | 0 | 0 | -- | 0.0e+00 | PASS |
 | std(h) change from a different seed | 0.014038 | 0 | -- | 1.0e-01 | PASS |
-| max |difference| evaluating t = 37.5 s cold vs after a sequence | 0 m | 0 m | -- | 0.0e+00 | PASS |
+| max \|difference\| evaluating t = 37.5 s cold vs after a sequence | 0 m | 0 m | -- | 0.0e+00 | PASS |
 | std(h) at t = 8000 s vs t = 0 | 0.019315 m | 0.019317 m | 1.20e-04 | 5.0e-02 | PASS |
-| max |difference| vs committed tile baseline | 0 m | 0 m | -- | 1.0e-12 | PASS |
+| max \|difference\| vs committed tile baseline | 0 m | 0 m | -- | 1.0e-12 | PASS |
 | tile baseline sha256 match | match | match | -- | -- | PASS |
-| max |difference| vs committed composite baseline | 0 | 0 | -- | 1.0e-12 | PASS |
+| max \|difference\| vs committed composite baseline | 0 | 0 | -- | 1.0e-12 | PASS |
 
 Notes:
 
@@ -161,7 +161,7 @@ Notes:
 |---|---|---|---|---|---|
 | depth == z_w - terrain_z (max residual) | 7.1054e-15 m | 0 m | -- | 1.0e-12 | PASS |
 | cells where sign(sdf) != -sign(depth) | 0 | 0 | -- | 0.0e+00 | PASS |
-| max ||shore_normal| - 1| in the nearshore band | 0 | 0 | -- | 1.0e-06 | PASS |
+| max \|\|shore_normal\| - 1\| in the nearshore band | 0 | 0 | -- | 1.0e-06 | PASS |
 | shore_normal points inland (fraction of cells) | 1 | 1 | 0.00e+00 | 1.0e-02 | PASS |
 | shore normal angular spread, cosine embayment | 67.6979 deg | -- | -- | -- | PASS |
 | Dean A used | 0.1 m^1/3 | -- | -- | -- | PASS |
@@ -176,7 +176,7 @@ Notes:
 | relative spread of sin(alpha)/c along a transect | 2.5620e-16 | 0 | -- | 1.0e-12 | PASS |
 | worst residual incidence angle at the waterline | 22.276 deg | 0 deg | -- | 2.5e+01 | PASS |
 | Kr range over the transect (45 deg incidence) | 0.8651 .. 1.0000 | -- | -- | -- | PASS |
-| max |Snell - blend| wave direction | 38.5013 deg | -- | -- | -- | PASS |
+| max \|Snell - blend\| wave direction | 38.5013 deg | -- | -- | -- | PASS |
 | depth at the outer breaker | 0.099826 m | 0.099826 m | 1.39e-16 | 5.0e-02 | PASS |
 | Hs / (gamma_b * d) inside the surf zone | 1 | 1 | 0.00e+00 | 1.0e-06 | PASS |
 | surf zone width | 0.9 m | -- | -- | -- | PASS |
@@ -187,10 +187,10 @@ Notes:
 | closed-form wetness vs sampled hard-waterline duty cycle | 4.9824e-05 | 0 | -- | 5.0e-03 | PASS |
 | wetness at mid-swash | 0.5 | 0.5 | 0.00e+00 | 1.0e-09 | PASS |
 | realised 4 std(h) vs predicted Hs_local (worst) | 0.077646 | 0 | -- | 1.0e-01 | PASS |
-| max |h_nearshore - h_deep| at d = 4.9 m | 2.7756e-17 m | 0 m | -- | 1.0e-03 | PASS |
+| max \|h_nearshore - h_deep\| at d = 4.9 m | 2.7756e-17 m | 0 m | -- | 1.0e-03 | PASS |
 | foam remaining after one half life | 0.5 | 0.5 | 0.00e+00 | 1.0e-09 | PASS |
 | equilibrium foam coverage in a breaking cell | 0.874785 | 0.874785 | 9.24e-11 | 1.0e-06 | PASS |
-| max |sdf| where foam coverage > 0.01 | 1.375 m | -- | -- | -- | PASS |
+| max \|sdf\| where foam coverage > 0.01 | 1.375 m | -- | -- | -- | PASS |
 | peak foam coverage | 0.261689 | -- | -- | -- | PASS |
 | cold vs sequential, worst per-cell relative error | 0.006144 | 0 | -- | 1.0e-02 | PASS |
 | spin-up steps for 0.5% residual at 30 fps | 688 | -- | -- | -- | PASS |
@@ -240,12 +240,38 @@ Notes:
 - **wet samples with zero wave height, winds all round** -- Four wind directions including two blowing offshore. Any non-zero fraction here means Kr is deleting the sea somewhere.
 - **mesh height: snell vs none** -- blend vs none differs by 0.00e+00 m in amplitude terms; snell must differ or the config key is still ignored.
 
+## Gate 5b -- refraction by ray integration
+
+| Check | Measured | Reference | Rel. error | Tolerance | Result |
+|---|---|---|---|---|---|
+| max \|dHs\| under a 30 deg shore_normal rotation | 0.024631 m | -- | -- | 1.0e-12 | FAIL |
+| ray vs analytic Ks*Kr, straight beach, 0 deg | 1.5286e-04 | -- | -- | 2.0e-02 | PASS |
+| ray vs analytic Ks*Kr, straight beach, 20 deg | 0.004994 | -- | -- | 2.0e-02 | PASS |
+| ray vs analytic Ks*Kr, straight beach, 40 deg | 0.017821 | -- | -- | 2.0e-02 | PASS |
+| launch reference energy carries cos(alpha) | 0 | -- | -- | 1.0e-12 | PASS |
+| p99.9 gain jump over 4 m of open water | 0.014397 | -- | -- | 2.0e-02 | PASS |
+| median gain over all wet water | 0.999421 | 1 | 5.79e-04 | 2.0e-02 | PASS |
+| min gain over wet cells (701 m crop) | 0.098225 | -- | -- | 5.0e-02 | PASS |
+| ray solve is bitwise reproducible | True | True | -- | -- | PASS |
+
+Notes:
+
+- **max |dHs| under a 30 deg shore_normal rotation** -- Refraction must respond to depth, not to the direction of the nearest shore. Non-zero here is the medial-axis seam.
+- **ray vs analytic Ks*Kr, straight beach, 0 deg** -- 200 cells over depths 0.3-4.3 m; median 0.00%. The energy-accumulation solver is not given the closed form anywhere -- it integrates rays through the celerity field and counts what arrives.
+- **ray vs analytic Ks*Kr, straight beach, 20 deg** -- 200 cells over depths 0.3-4.3 m; median 0.05%. The energy-accumulation solver is not given the closed form anywhere -- it integrates rays through the celerity field and counts what arrives.
+- **ray vs analytic Ks*Kr, straight beach, 40 deg** -- 200 cells over depths 0.3-4.3 m; median 0.13%. The energy-accumulation solver is not given the closed form anywhere -- it integrates rays through the celerity field and counts what arrives.
+- **launch reference energy carries cos(alpha)** -- e_ref must scale as 1/cos(alpha) with obliquity.
+- **p99.9 gain jump over 4 m of open water** -- 9.2M sampled pairs on the 701 m straits crop; p99 0.0067, worst 0.0272. Against 0.8819 for `snell` and 0.3001 for `blend` on the full export. The deposition kernel is sigma = 80 m, an empirical noise control rather than a derived length -- see the approximations note in docs/phase5b_refraction.md.
+- **median gain over all wet water** -- Not imposed: the normalisation is taken on the deepest 5% only. A launch-spacing or per-ray-power error biases this away from 1 while leaving the field's shape intact.
+- **min gain over wet cells (701 m crop)** -- 0.000% of wet cells below 0.05. Scoped to the crop: the full straits export gives 0.006 and gate 5b.3 remains open there, pending the short-fetch wind-sea floor.
+- **ray solve is bitwise reproducible** -- No RNG, but the energy accumulator is summed in a buffered order; floating-point addition is not associative, so a flush-boundary-dependent order would show up here.
+
 ## Gate 6 -- mesh generation and export
 
 | Check | Measured | Reference | Rel. error | Tolerance | Result |
 |---|---|---|---|---|---|
 | mesh vertices | 19762 | -- | -- | -- | PASS |
-| max |‖normal‖ - 1| | 5.9605e-08 | 0 | -- | 1.0e-05 | PASS |
+| max \|‖normal‖ - 1\| | 5.9605e-08 | 0 | -- | 1.0e-05 | PASS |
 | min normal z component | 0.937343 | -- | -- | -- | PASS |
 | wet posts not meshed | 0 | 0 | -- | 0.0e+00 | PASS |
 | furthest inland meshed post (sdf) | 0.25 m | -- | -- | -- | PASS |

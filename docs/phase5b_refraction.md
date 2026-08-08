@@ -1,6 +1,8 @@
 # Phase 5b — refraction on a complex coastline
 
-**Status: architecture only. Nothing here is built.**
+**Status: the solver is built and gated; it is not wired into production.**
+`pywave/rays.py` passes 5b.1, 5b.2 and 5b.8, and `nearshore.transform` still has
+no `"rays"` mode. Section 5b below has the per-gate detail.
 
 A design for replacing the per-cell refraction approximation with something that
 survives a real shoreline, plus the gate that would say it works.
@@ -200,6 +202,123 @@ Each check has a number, not a vibe. Gates 1–6 style.
 
 Diffraction behind islands (needs 3b), wave–current interaction, reflection off
 cliffs, non-linear transfer. Each gets a note in the approximations table.
+
+---
+
+## 5b. Implementation status
+
+`pywave/rays.py` exists and is **not wired into anything** — the production path
+is untouched until the gates pass.
+
+| Gate | Status | Measured |
+|---|---|---|
+| 5b.1 straight beach reduces to Snell | **PASS** | worst 0.02 / 0.50 / 1.78% at 0 / 20 / 40° incidence, against 2% |
+| 5b.2 continuity | **PASS** | 0.0144 on the crop, against 0.02 — see below |
+| 5b.3 no annihilation | **PASS on the 701 m crop, open on the full export** | 0.098 on the crop; **0.006** on the full straits |
+| 5b.4, 5b.5, 5b.7 | not started | — |
+| 5b.6 independent of `shore_normal` | pinned as a strict xfail | 0.0246 m today, must be 0 |
+| 5b.8 reproducibility | **PASS** | bitwise, on a repeat solve |
+| 5b.9 cost | recorded | 16 s for the crop at `decimate=32`; 348 s for the full export at `decimate=4` |
+
+`tests/test_rays.py` runs 5b.1 on the planar beach and 5b.2, 5b.3 and 5b.8 on
+the `straits_crop` export, skipping the last three when no export is present.
+They share one solve at `decimate=32, n_dirs=15, rays_per_dir=1500,
+smooth_m=80`, stated once so no gate can be passed by retuning the solve for it.
+
+**5b.3 is not closed.** It passes on 701 m of coastline and fails on 7.5 km, and
+the difference is fetch, not method: the crop has no sheltered run long enough
+for a shadow to reach zero. Reporting it as PASS without that qualifier would be
+reporting the size of the test scene.
+
+### Measuring a "one-cell jump"
+
+The number is meaningless without the spacing it is measured at, and two rules
+matter more than the percentile:
+
+- **Fix the separation, not the cell.** The reference figures below are at the
+  full export's 4 m posts. The crop is on 0.25 m posts, so the same gate is a
+  lag of 16 posts there. Comparing a 0.25 m jump against a 4 m criterion would
+  pass anything.
+- **Require water the whole way between, not just at both ends.** On a ragged
+  shoreline two cells 4 m apart are routinely both wet with land in between.
+  That pair is a shoreline, not a discontinuity in the wave field. This is how
+  the metric bug announced itself: counting those pairs made p99 improve with
+  smoothing while p99.9 got worse, because a wider kernel pulls more shore into
+  each sample.
+
+### 5b.2, on the Strait of Hormuz export at 4 m
+
+Jumps counted **between two wet neighbours only**. A wet cell beside a dry one is
+a shoreline, not a discontinuity in the wave field. Measuring across that
+boundary makes every method look bad *and* makes smoothing look actively harmful
+— which is how the metric bug announced itself, since p99 improved with smoothing
+while p99.9 got worse.
+
+| Field | p99 jump | p99.9 jump |
+|---|---|---|
+| `snell` | 0.0923 | **0.8819** |
+| `blend` | 0.0093 | **0.3001** |
+| rays, no smoothing | 0.0432 | 0.1530 |
+| rays, σ = 40 m | 0.0109 | 0.0236 |
+| **rays, σ = 80 m** | 0.0091 | **0.0121** |
+| rays, σ = 160 m | 0.0058 | 0.0081 |
+
+Deep-water median gain came out **0.997–0.999** against a required 1.0. Nothing
+in the solve forces that, so it is an independent check that the launch
+normalisation is right.
+
+### What the smoothing is, honestly
+
+Energy deposition is Monte Carlo, so the raw field is shot noise. At 116 ray
+visits per cell the gain noise is ~4.6%, and 5b.2 needs under ~1.4% — 11× more
+sampling. Two levers avoid paying that:
+
+- **`decimate`** — solve on a coarser grid. The gain field varies over the
+  *bathymetry's* length scale, not the mesh's, so 16 m instead of 4 m loses
+  nothing real and multiplies visits per cell by 16. Solve time 348 s.
+- **`smooth_m`** — a deposition kernel of finite width. A ray is a wave *packet*,
+  not a line, and energy cannot localise finer than about a wavelength.
+
+The kernel is currently an **empirical noise control, not a derived length**. The
+principled version is more rays until it is unnecessary; σ = 80 m is what the
+table above says suffices — 5.9 λ_p at the crop's λ_p = 13.6 m, which is well
+past what "a ray is a wave packet" justifies. That belongs in the approximations
+table when the phase lands, stated as such.
+
+### The decimation seam
+
+`decimate` cost a bug on the way in, and it is worth recording because it looked
+exactly like physics. Upsampling the coarse gain back to the fine grid with
+`zoom` blends neighbouring cells, so the zeros sitting in the dry cells were
+dragged into the water within one *coarse* cell of every shoreline — a seam
+created **after** the smoothing, which is why no amount of smoothing touched it.
+
+It was invisible in aggregate and unmistakable once localised: at
+`decimate=16` on the crop, **100%** of the worst 0.1% of 4 m gain jumps lay
+inside that 4 m band, against 2.2% of the sampled pairs. Excluding the band
+dropped p99.9 from 0.396 to 0.026.
+
+The fix is to extend the gain into the dry cells by nearest-wet fill before
+upsampling. Nearest-wet rather than the normalised zoom the smoothing step uses,
+because water thinner than a coarse cell has no wet coarse neighbour at all, so
+the normalised version divides 0/0 exactly where the fill matters. After the fix,
+p99.9 is 0.026 with the band included and the worst jumps are no longer near
+land at all.
+
+### Remaining: 5b.3, geometric shadows
+
+Ray theory has no diffraction, so a cell behind a headland that no ray reaches
+gets exactly zero. The 25-direction fan over ±90° softens this without removing
+it: min gain 0.006 on the full export.
+
+The crop passing at 0.098 does not weaken this. Both numbers are the same
+mechanism read at two fetches — the deeper the sheltered run, the further the
+hole goes — so the crop bounds how bad the shallow case is and says nothing
+about the deep one.
+
+The answer is probably not more rays but a **floor from locally generated waves**.
+A sheltered bay is not calm — it has its own short-fetch wind sea. That is a real
+term rather than a clamp, and it is the next piece of work.
 
 ---
 

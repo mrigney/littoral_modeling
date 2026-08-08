@@ -199,6 +199,16 @@ def _fmt(v, unit: str = "") -> str:
     return f"{s} {unit}".strip()
 
 
+def _cell(text: str) -> str:
+    """Escape a check name for a markdown table cell.
+
+    A name like ``max |dHs| under a 30 deg rotation`` is perfectly readable
+    prose and three spurious columns, which silently shifts every value in that
+    row one place to the left.
+    """
+    return str(text).replace("|", "\\|")
+
+
 _GATE_TITLES = {
     "1": "Gate 1 -- spectrum and moments",
     "2": "Gate 2 -- FFT surface synthesis",
@@ -206,7 +216,13 @@ _GATE_TITLES = {
     "4": "Gate 4 -- terrain export loading",
     "5": "Gate 5 -- nearshore transformation",
     "6": "Gate 6 -- mesh generation and export",
+    "5b": "Gate 5b -- refraction by ray integration",
 }
+
+# Report order. Not `sorted()`: 5b belongs after 5, and "5b" < "6" only by
+# accident of ASCII. Any gate recorded but missing from here is dropped from the
+# report silently, which is how Phase 5b's checks went unreported until now.
+_GATE_ORDER = ("1", "2", "3", "4", "5", "5b", "6")
 
 
 def pytest_sessionfinish(session, exitstatus):
@@ -260,7 +276,13 @@ def pytest_sessionfinish(session, exitstatus):
     )
     lines.append("")
 
-    for gate in ("1", "2", "3", "4", "5", "6"):
+    unknown = sorted({c.gate for c in checks} - set(_GATE_ORDER))
+    if unknown:
+        raise RuntimeError(
+            f"checks recorded against unknown gate(s) {unknown}; add them to "
+            f"_GATE_ORDER and _GATE_TITLES or they vanish from the report")
+
+    for gate in _GATE_ORDER:
         rows = [c for c in checks if c.gate == gate]
         if not rows:
             continue
@@ -271,7 +293,7 @@ def pytest_sessionfinish(session, exitstatus):
         for c in rows:
             rel = c.rel_error
             lines.append(
-                f"| {c.name} | {_fmt(c.measured, c.unit)} | {_fmt(c.reference, c.unit)} "
+                f"| {_cell(c.name)} | {_fmt(c.measured, c.unit)} | {_fmt(c.reference, c.unit)} "
                 f"| {'--' if rel is None else f'{rel:.2e}'} "
                 f"| {'--' if c.tol is None else f'{c.tol:.1e}'} "
                 f"| {'PASS' if c.passed else 'FAIL'} |"
