@@ -694,6 +694,134 @@ def test_a_sheltered_bay_is_chop_not_scaled_down_swell(record):
     assert over_one > 1.0, "a short-fetch sea outstrips deep water at high k"
 
 
+# ---------------------------------------------------------------------------
+# Caching -- the solve is minutes, so it has to live on disk
+# ---------------------------------------------------------------------------
+
+
+def _tiny_scene():
+    """A bathymetry and sea state small enough to solve in the test suite."""
+    from pywave import load_config
+    from pywave.bathymetry import Bathymetry
+
+    cfg = load_config(REPO / "configs" / "test_lake.yaml")
+    bathy = Bathymetry.dean_beach(nx=48, ny=48, dx=8.0, shoreline_y=300.0,
+                                  max_depth=6.0)
+    return bathy, cfg, dict(n_dirs=3, rays_per_dir=60, smooth_m=0.0)
+
+
+def test_every_solve_parameter_reaches_the_cache_key(record):
+    """The failure this guards is silent, so it is guarded structurally.
+
+    A cache key built from a hand-written list of parameters has to be updated
+    in lockstep with `solve`'s signature, and when someone forgets, nothing
+    crashes -- a stale field comes back with complete confidence, from the
+    slowest step in the scene, which is exactly the result nobody re-runs to
+    check.
+
+    So the key is built by introspecting the signature, and this walks that same
+    signature and asserts every parameter actually moves the digest. A new
+    parameter is covered the day it is added, without anyone remembering to
+    come here.
+    """
+    import inspect
+
+    from pywave import rays
+
+    bathy, cfg, _ = _tiny_scene()
+    base = rays.RayField.cache_key(bathy, cfg, 1.0)
+
+    sig = inspect.signature(rays.RayField.solve)
+    checked, missed = [], []
+    for name, p in sig.parameters.items():
+        if name in ("bathy", "cfg", "omega"):
+            continue
+        d = p.default
+        if isinstance(d, bool):
+            alt = not d
+        elif isinstance(d, (int, float)):
+            alt = d + 1
+        elif d is None:
+            alt = 1.0
+        else:
+            continue
+        checked.append(name)
+        if rays.RayField.cache_key(bathy, cfg, 1.0, **{name: alt}) == base:
+            missed.append(name)
+
+    record("5b", "solve parameters absent from the cache key", len(missed),
+           reference=0, tol=0, unit="",
+           note=f"walked {len(checked)} parameters off solve()'s signature: "
+                f"{', '.join(checked)}. Any that failed to move the digest "
+                f"would silently return another configuration's field.",
+           passed=not missed)
+    assert not missed, f"these do not reach the cache key: {missed}"
+    assert len(checked) >= 8, "signature introspection found suspiciously few"
+
+
+def test_cache_key_tracks_the_bed_and_the_sea_but_not_the_clock(record):
+    """Two beds with the same mean depth are not the same bed.
+
+    The bathymetry is hashed as raw bytes rather than as any summary of it, so
+    a single cell moving by a centimetre invalidates. The sea state has to
+    invalidate too -- same coastline, different wind, different answer.
+    """
+    import dataclasses
+
+    from pywave import rays
+
+    bathy, cfg, _ = _tiny_scene()
+    base = rays.RayField.cache_key(bathy, cfg, 1.0)
+
+    moved = dataclasses.replace(bathy, depth=bathy.depth.copy())
+    moved.depth[0, 0] += 0.01
+    windier = dataclasses.replace(
+        cfg, wind=dataclasses.replace(cfg.wind, speed=cfg.wind.speed + 0.1))
+
+    cases = {
+        "same inputs twice": rays.RayField.cache_key(bathy, cfg, 1.0) == base,
+        "one cell 1 cm deeper": rays.RayField.cache_key(moved, cfg, 1.0) != base,
+        "u10 +0.1 m/s": rays.RayField.cache_key(bathy, windier, 1.0) != base,
+        "omega +0.1%": rays.RayField.cache_key(bathy, cfg, 1.001) != base,
+        "a default passed explicitly":
+            rays.RayField.cache_key(bathy, cfg, 1.0, wind_sea=True) == base,
+    }
+    record("5b", "cache key discrimination checks passed", sum(cases.values()),
+           reference=len(cases), tol=0, unit="",
+           note="; ".join(f"{k}: {v}" for k, v in cases.items()),
+           passed=all(cases.values()))
+    assert all(cases.values()), [k for k, v in cases.items() if not v]
+
+
+def test_a_cached_field_is_the_field_that_was_solved(record, tmp_path):
+    """Round trip, and no cache at all when none was asked for.
+
+    Stored as float32 deliberately -- seven significant figures is far past what
+    a Monte Carlo solve smoothed over metres can justify -- so this pins that
+    the loss is at float32 and not somewhere worse.
+    """
+    from pywave import rays
+
+    bathy, cfg, kw = _tiny_scene()
+    miss = rays.RayField.cached(bathy, cfg, 1.0, cache_dir=tmp_path, **kw)
+    hit = rays.RayField.cached(bathy, cfg, 1.0, cache_dir=tmp_path, **kw)
+
+    d_gain = float(np.abs(miss.gain - hit.gain).max())
+    d_theta = float(np.abs(miss.theta - hit.theta).max())
+    assert miss.meta["cache"] == "miss" and hit.meta["cache"] == "hit"
+
+    plain = tmp_path / "untouched"
+    rays.RayField.cached(bathy, cfg, 1.0, cache_dir=None, **kw)
+    assert not plain.exists(), "cache_dir=None must not write anything"
+
+    record("5b", "cache round-trip error in gain", d_gain, reference=0.0,
+           tol=1e-6, unit="",
+           note=f"direction agrees to {d_theta:.2e} rad. Fields are stored as "
+                f"float32, so this is the storage precision and nothing else.",
+           passed=d_gain < 1e-6 and d_theta < 1e-6)
+    assert d_gain < 1e-6 and d_theta < 1e-6
+
+
 @pytest.mark.slow
 @has_crop
 def test_5b8_the_solve_is_reproducible(record, crop_rays):

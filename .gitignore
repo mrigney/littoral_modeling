@@ -25,6 +25,11 @@ runs/
 *.ply
 *.npy
 !tests/baseline/*.npy
+# Cached ray solves (RayField.save). Derived from the bathymetry and sea state,
+# keyed by a hash of both, and tens of megabytes each -- regenerate, do not
+# version. Listed separately from *.npy because the miss is expensive enough
+# that someone will be tempted.
+*.npz
 
 # Terrain exports. Ignored as a *directory* rather than by extension: `*.npy`
 # alone would leave grid_meta.json tracked on its own, and a half-committed

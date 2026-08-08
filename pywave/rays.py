@@ -59,14 +59,28 @@ needs no special case at a caustic.
 
 from __future__ import annotations
 
+import hashlib
+import inspect
+import json
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 
 from .constants import G
 
 __all__ = ["celerity_fields", "launch_line", "trace_rays", "shelter_fetch",
-           "band_fetch_response", "wind_sea_floor", "RayField"]
+           "band_fetch_response", "wind_sea_floor", "RayField", "CACHE_VERSION"]
+
+
+CACHE_VERSION = 1
+"""Bump on any change to this module that would change the answer.
+
+A cache that quietly returns a stale field is worse than having no cache at all:
+the solve is the slowest thing in the scene, so a wrong one is exactly the sort
+of result nobody re-runs to check. Every other input is hashed automatically --
+this constant covers the one thing hashing cannot see, which is the code.
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -817,6 +831,113 @@ class RayField:
                          "wind_sea": bool(wind_sea),
                          "sheltered_cells": int(np.sum(wet & (np.asarray(floor_e)
                                                               > 0.0)))})
+
+    # -- caching -------------------------------------------------------------
+    #
+    # The solve is minutes on a real export and the field is stationary, so it
+    # belongs on disk beside the foam spin-up rather than in front of every
+    # frame. What makes that safe is entirely the key.
+
+    @staticmethod
+    def cache_key(bathy, cfg, omega: float, **solve_kwargs) -> str:
+        """A digest of everything that changes the answer, and nothing else.
+
+        Every solve parameter is read from :meth:`solve`'s own signature with
+        defaults applied, rather than listed here. That is deliberate: a list
+        would have to be updated in lockstep with the signature, and the failure
+        mode when someone forgets is not a crash but a stale field returned with
+        complete confidence. Adding a parameter to ``solve`` now changes the key
+        automatically, whether or not the caller passes it.
+
+        The bathymetry goes in as raw bytes with its dtype and shape, not as a
+        summary statistic -- two different beds can share a mean depth.
+        """
+        sig = inspect.signature(RayField.solve)
+        bound = sig.bind(bathy, cfg, omega, **solve_kwargs)
+        bound.apply_defaults()
+        params = {k: v for k, v in bound.arguments.items()
+                  if k not in ("bathy", "cfg", "cls")}
+
+        h = hashlib.blake2b(digest_size=16)
+        h.update(f"pywave.rays v{CACHE_VERSION}".encode())
+
+        depth = np.ascontiguousarray(bathy.depth)
+        h.update(f"{depth.dtype}|{depth.shape}".encode())
+        h.update(depth.tobytes())
+        m = bathy.meta
+        h.update(json.dumps([m.dx, list(m.origin), list(m.shape),
+                             m.water_level], sort_keys=True).encode())
+
+        w = cfg.wind
+        h.update(json.dumps({
+            "u10": w.speed, "fetch": w.fetch, "dir": w.direction_rad,
+            "gamma": cfg.spectrum.gamma, "spreading": cfg.spectrum.spreading,
+            "solve": {k: (float(v) if isinstance(v, (int, float)) and
+                          not isinstance(v, bool) else v)
+                      for k, v in params.items()},
+        }, sort_keys=True, default=str).encode())
+        return h.hexdigest()
+
+    def save(self, directory, key: str) -> Path:
+        """Write to ``<directory>/rayfield_<key>.npz``.
+
+        Fields are stored as float32. The gain is a ratio near 1 and the angle
+        is in radians, so seven significant figures is far past what a Monte
+        Carlo solve with a metres-wide smoothing kernel can justify, and the
+        difference is 2x on disk.
+        """
+        directory = Path(directory)
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"rayfield_{key}.npz"
+        np.savez_compressed(
+            path,
+            gain=self.gain.astype(np.float32),
+            hits=self.hits.astype(np.float32),
+            theta=self.theta.astype(np.float32),
+            directionality=self.directionality.astype(np.float32),
+            omega=np.float64(self.omega),
+            meta=np.array(json.dumps(self.meta, default=str)),
+        )
+        return path
+
+    @classmethod
+    def load(cls, directory, key: str) -> "RayField | None":
+        """Read a cached field back, or ``None`` if it is not there.
+
+        ``None`` rather than an exception: a cache miss is the normal first run,
+        not an error. A *corrupt* file is an error and is left to raise.
+        """
+        path = Path(directory) / f"rayfield_{key}.npz"
+        if not path.exists():
+            return None
+        with np.load(path, allow_pickle=False) as z:
+            return cls(gain=z["gain"].astype(np.float64),
+                       hits=z["hits"].astype(np.float64),
+                       theta=z["theta"].astype(np.float64),
+                       directionality=z["directionality"].astype(np.float64),
+                       omega=float(z["omega"]),
+                       meta=json.loads(str(z["meta"])))
+
+    @classmethod
+    def cached(cls, bathy, cfg, omega: float, *, cache_dir=None,
+               **solve_kwargs) -> "RayField":
+        """:meth:`solve`, reading and writing a cache when given somewhere to.
+
+        With ``cache_dir=None`` this is exactly ``solve`` -- no cache, no file,
+        no surprise. Callers that do not care about persistence should not have
+        to opt out of it.
+        """
+        if cache_dir is None:
+            return cls.solve(bathy, cfg, omega, **solve_kwargs)
+        key = cls.cache_key(bathy, cfg, omega, **solve_kwargs)
+        hit = cls.load(cache_dir, key)
+        if hit is not None:
+            hit.meta = dict(hit.meta, cache="hit", cache_key=key)
+            return hit
+        rf = cls.solve(bathy, cfg, omega, **solve_kwargs)
+        rf.meta = dict(rf.meta, cache="miss", cache_key=key)
+        rf.save(cache_dir, key)
+        return rf
 
     def sample(self, bathy, x, y):
         """``(gain, theta)`` at arbitrary scene coordinates.

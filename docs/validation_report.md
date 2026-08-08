@@ -4,12 +4,12 @@
 
 | | |
 |---|---|
-| generated | 2026-08-08 15:19:24 UTC |
-| git_sha | `daafce3c85e34dff834f255d4e2e0ef5eed3b6bd (working tree dirty)` |
+| generated | 2026-08-08 16:20:34 UTC |
+| git_sha | `c803e21495020347093b059cb48c85615b0fe599 (working tree dirty)` |
 | scene | `configs/test_lake.yaml` |
 | python | 3.14.5 (Windows AMD64) |
 | numpy / scipy | 2.5.1 / 1.18.0 |
-| checks recorded | 161 |
+| checks recorded | 164 |
 | exit status | PASS |
 
 Every number below was measured by the test suite against the implementation in this commit. Tolerances are the gate criteria from `littoral-water-implementation-cookbook.md`, except where a deviation is recorded in [Gate deviations](#gate-deviations).
@@ -267,6 +267,9 @@ Notes:
 | wind-sea floor on fully exposed water | 0 | 0 | -- | 0.0e+00 | PASS |
 | per-band floor vs closed-form total | 8.4089e-04 | 0 | -- | 2.0e-03 | PASS |
 | short-band / long-band floor ratio at 250 m fetch | 5.1861e+11 | -- | -- | -- | PASS |
+| solve parameters absent from the cache key | 0 | 0 | -- | 0.0e+00 | PASS |
+| cache key discrimination checks passed | 5 | 5 | 0.00e+00 | 0.0e+00 | PASS |
+| cache round-trip error in gain | 5.9552e-08 | 0 | -- | 1.0e-06 | PASS |
 | ray solve is bitwise reproducible | True | True | -- | -- | PASS |
 
 Notes:
@@ -290,6 +293,9 @@ Notes:
 - **wind-sea floor on fully exposed water** -- Every direction leaves the domain without crossing land, so every direction is already carried by the rays.
 - **per-band floor vs closed-form total** -- Sum over bands weighted by their deep-water shares, against (F/F_scene)^1.10. The small residual is the variance above the top band edge, which the banded form drops and the closed form keeps.
 - **short-band / long-band floor ratio at 250 m fetch** -- bands read 0.0000 / 0.0003 / 0.5186 of their own deep-water energy. The short band peaks at 1.353 across this scene -- above 1, which the scalar form cannot express.
+- **solve parameters absent from the cache key** -- walked 9 parameters off solve()'s signature: n_dirs, rays_per_dir, spread_deg, ds_frac, break_depth, min_hits, decimate, smooth_m, wind_sea. Any that failed to move the digest would silently return another configuration's field.
+- **cache key discrimination checks passed** -- same inputs twice: True; one cell 1 cm deeper: True; u10 +0.1 m/s: True; omega +0.1%: True; a default passed explicitly: True
+- **cache round-trip error in gain** -- direction agrees to 5.94e-08 rad. Fields are stored as float32, so this is the storage precision and nothing else.
 - **ray solve is bitwise reproducible** -- No RNG, but the energy accumulator is summed in a buffered order; floating-point addition is not associative, so a flush-boundary-dependent order would show up here.
 
 ## Gate 6 -- mesh generation and export

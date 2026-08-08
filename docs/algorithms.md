@@ -563,6 +563,56 @@ The interpretation used:
 For the shipped config (Nyquists 25.1 / 21.7 / 35.0 rad/m) that gives
 `[0, 7.61) [7.61, 15.22) [15.22, 34.97)`.
 
+### Where the first edge lands, and why it decides everything
+
+The rule above guarantees each band *fits*. It says nothing about whether the
+bands are worth having, and that is a separate question with a separate answer.
+
+Because JONSWAP's shape is universal in `f/f_p`, and `k ∝ f²` in deep water, the
+variance split is a pure function of where the first interior edge sits in units
+of `k_p` — independent of wind, fetch or scene:
+
+| first edge | band 1 then holds |
+|---|---|
+| 1.5 `k_p` | 71.9% |
+| 2 `k_p` | 82.4% |
+| 3 `k_p` | 91.5% |
+| 8 `k_p` | 98.7% |
+| 16 `k_p` | 99.7% |
+
+**Aim for 1.5–3 `k_p`.** Push it past ~8 and one band holds the whole spectrum,
+so every frequency-dependent nearshore effect — §10's per-band `Ks`, §11's
+refraction — collapses to a single representative frequency, and the composite
+pays three FFTs a frame to do one band's work.
+
+Nothing else goes wrong when it does, which is what makes this worth stating
+explicitly: `Hs` is still right, the bands still sum, §16's LOD invariant still
+closes. Measured on the shipped scenes before it was checked, `straits_crop` had
+inherited the test lake's 64/37/23 m tiles against a peak wavelength eight times
+longer and sat at **16.4 `k_p`, 99.7% in band 1**.
+
+The two constraints pull in opposite directions, so they belong to different
+tiles:
+
+| | job | scale it with |
+|---|---|---|
+| tiles 1–2 | fix `k_ref`, hence where the bands split | `λ_p` |
+| tile 3 | fix `k_max`, hence §16's mesh/BSDF handoff | `output.mesh_dx` |
+
+Resizing on that rule is a **redistribution, not a different sea**: moving
+`straits_crop` from 99.7% to 82.5% in band 1 left `Hs`, `k_max` and resolved
+`mss` unchanged to four decimals. `TileSet.sizing()` reports the split and
+`run_scene` prints it.
+
+Two things that are *not* reasons to resize. Tile size does not affect spectral
+accuracy — holding the Nyquist fixed and growing the largest tile from 4.7 to 75
+peak wavelengths moves the realised `Hs` by 0.08%, because the build integrates
+the spectrum over each grid cell rather than point-sampling it. And a tile
+smaller than the domain is normal rather than a defect: the incommensurate sizes
+and rotations of the next section mean the *composite* does not repeat even
+though each tile does. A short tile costs variety, not energy — below about
+10 `λ_p` it holds only a handful of wave groups, and those recur.
+
 ### Frames and rotations
 
 Each tile's grid is rotated by `φ` relative to world. So:
@@ -870,9 +920,17 @@ whatever the scene asked for.
 | Real, complex | `blend` | Turns the waves, leaves height alone (`Kr = 1`) |
 
 `blend` is a **workaround, not a fix**: it buys a seam-free scene by discarding
-headland focusing, which is real physics. The replacement — ray integration with
-a wave-action balance — is designed in
-[phase5b_refraction.md](phase5b_refraction.md) and not built.
+headland focusing, which is real physics.
+
+The replacement — ray integration with a wave-action balance — is designed in
+[phase5b_refraction.md](phase5b_refraction.md) and **is now built and gated in
+`pywave/rays.py`, but is not wired into `transform`**, so it is not what any
+scene currently renders and the mode table above still stands. It measures
+0.0123 for the p99.9 jump that `snell` scores 0.375 on, while keeping the
+headland focusing that `blend` throws away (1.34 headland/bay against a 1.2
+criterion). What remains before it can be selected here is that `transform`
+applies refraction per spectral band and `RayField` solves one frequency; see
+§17 R5.
 
 ### The blend alternative, and when it is used
 
@@ -1390,6 +1448,28 @@ Everything the model does *not* do exactly, in one place.
 | 7 | `K_CAPILLARY = 400 rad/m` cut on the slope integral | Stated once, reported with every mss | Any comparison against a different cut |
 | 8 | Constant mesh post spacing (no LOD rings) | Bounded region substitutes | Whole-domain meshes at fine spacing |
 | 9 | Foam spin-up truncates history at 0.5% | Bounded and stated | Nothing; the residual is a declared number |
+| 10 | Tile bands reduce each to one representative frequency | Band-count error on `Hs` is 0.95% at three bands, 0.18% at twelve | Only if the first band edge is far above `k_p`, when it becomes total — see §8 |
+
+### Not yet in force: the ray solver
+
+`pywave/rays.py` is built and gated but **not wired into `transform`**, so none
+of the following is in any rendered scene yet. They are listed here so the table
+is complete the day it is, and because two of them are approximations the
+production path does not currently have to make.
+
+| # | Approximation | Why acceptable | Where it would bite |
+|---|---|---|---|
+| R1 | Ray theory has no diffraction | Energy still reaches shadows through the directional fan and R2 | Sharp obstacles: an island lee, a harbour mouth |
+| R2 | Sheltered water floored by a locally generated short-fetch sea | A sheltered bay is not calm, and 0 is further from the truth than this is; takes min gain from 0.000 to 0.0896 on the straits export | Anywhere the shelter fetch is not the real fetch — a bay open to a second wind direction |
+| R3 | Deposition smoothed with a σ = 80 m kernel | Monte Carlo shot noise; the principled fix is more rays, and this is what the gate needs | It is 5.9 `λ_p`, well past what "a ray is a wave packet" justifies. Structure finer than that is not resolved |
+| R4 | Solved on a decimated grid and interpolated up | The gain varies on the bathymetry's length scale, not the mesh's | Bathymetry with real structure below the solve spacing |
+| R5 | One representative frequency for the whole spectrum | — | **Unresolved.** `transform` works per band and `RayField` is single-frequency; this is what must close before wiring |
+
+R5 is the open one. The per-band wind sea (`wind_sea_floor(bands=...)`) is
+already built against it — a short fetch moves the peak up rather than scaling
+the spectrum down, so a sheltered bay is short chop with no swell in it, and a
+single number for the floor is 20× low in the short band and 5× high in the
+long one.
 
 ### Deviations from the cookbook
 
