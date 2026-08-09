@@ -21,9 +21,10 @@ anisotropy — as physically derived numbers rather than art-directed knobs.
 | 4 | Houdini terrain and lake basin | **Loader implemented** — `Bathymetry.from_export` reads a §4.5 export; the Houdini side is yours |
 | 5 | Shoaling, refraction, breaking, foam | **Implemented** against that synthetic profile |
 | 6 | Mesh generation, channel packing, PLY export | **Implemented** — constant post spacing; §6.2 LOD rings deliberately deferred |
-| 5b | Refraction on a complex coastline | **Architected**, not built — [docs/phase5b_refraction.md](docs/phase5b_refraction.md) |
+| 5b | Refraction on a complex coastline | **Implemented**, selectable as `refraction: rays`, not the default — [docs/phase5b_refraction.md](docs/phase5b_refraction.md) |
 | 7–10 | Mitsuba BSDF, emissivity, EMBER integration | Not started |
 | 11 | Boat wake, turbulent wake, bow spray | **Architected**, not built — [docs/phase11_wake_spray.md](docs/phase11_wake_spray.md) |
+| 12 | Anchored objects in the water | **Architected**, mostly not needed — [docs/phase12_anchored_props.md](docs/phase12_anchored_props.md) |
 
 **New here?** [docs/gallery.md](docs/gallery.md) explains the whole model in
 eight figures, with no code required.
