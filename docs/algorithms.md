@@ -18,6 +18,25 @@ Every number quoted here is reproduced by `pytest`, which regenerates the
 validation report. Where a number appears in prose it is a measurement, not an
 expectation.
 
+> **New to wave modelling?** Read
+> [§2 of the user's guide](users_guide.md#2-the-words) first — it defines every
+> term used here in plain language, in about two pages. This document assumes
+> those words and goes straight to the physics.
+
+### The shape of the model, in one paragraph
+
+Wind blowing over a fetch of open water produces a **spectrum**: how much wave
+energy sits at each wave size and direction (§3, §4). That spectrum is turned
+into an actual moving surface by summing thousands of sine waves with random
+phases, which an FFT does efficiently (§7), on several overlapping patches so the
+result does not visibly repeat (§8). Where the water shallows, each wave changes
+height (§10) and direction (§11, §11b) according to the depth beneath it, until
+it is too steep to stand and breaks (§12), leaving foam (§14) and a wet band up
+the beach (§13). The result is written out as a triangle mesh, with everything
+too small to draw carried as per-vertex roughness instead (§15, §16).
+
+Everything is derived from the spectrum. Nothing is art-directed.
+
 ---
 
 ## Contents
@@ -33,6 +52,7 @@ expectation.
 9. [Bathymetry](#9-bathymetry)
 10. [Shoaling](#10-shoaling)
 11. [Refraction](#11-refraction)
+11b. [Refraction by ray tracing](#11b-refraction-by-ray-tracing)
 12. [Breaking and depth limiting](#12-breaking-and-depth-limiting)
 13. [Swash and wetness](#13-swash-and-wetness)
 14. [Foam](#14-foam)
@@ -941,17 +961,12 @@ and §12 breaking, §13 wetness and §14 foam all read that height.
 `blend` is a **workaround, not a fix**: it buys a seam-free scene by discarding
 headland focusing, which is real physics.
 
-The replacement — ray integration with a wave-action balance — is designed in
-[phase5b_refraction.md](phase5b_refraction.md), built in `pywave/rays.py`, and
-**selectable as `refraction: rays`**. It scores 0.0123 on the p99.9 jump that
-`snell` scores 0.375 on, while keeping the headland focusing `blend` throws away
-(1.34 headland/bay against a 1.2 criterion).
-
-The property that makes it work is not a better `Kr`, it is the absence of one.
-Celerity is a function of depth alone, depth is continuous wherever the bed is,
-so the ray paths are continuous. `shore_normal` is never read on that path —
-rotate every shore normal by 30° and the answer changes by **exactly zero**,
-against 0.448 m for `snell` on the same bed.
+The replacement is built and selectable as `refraction: rays`. It scores
+**0.0123** on the p99.9 jump that `snell` scores 0.375 on, while keeping the
+headland focusing `blend` throws away. The property that makes it work is not a
+better `Kr` but the **absence** of one — see
+[§11b](#11b-refraction-by-ray-tracing), which is where the rest of this story
+is.
 
 ### The blend alternative, and when it is used
 
@@ -982,6 +997,146 @@ being computed from a discontinuous input anyway. Hence the mode table above.
 | `Kr` at normal incidence | 1.0 | exact |
 | `Kr` for offshore-bound waves | 1.0 | exact |
 | Wet samples with zero height, four wind quadrants | 0% | 0 |
+
+---
+
+## 11b. Refraction by ray tracing
+
+**Module:** `pywave/rays.py`. **Selected by** `nearshore.refraction: rays`.
+**Design:** [phase5b_refraction.md](phase5b_refraction.md).
+
+### The problem it solves
+
+Everything in §11 is exact for straight parallel contours and breaks on a real
+one, for a reason that is not a coding error. `Kr` compares ray spacing *here*
+against ray spacing in deep water — a statement about a **path** — but it is
+evaluated per cell, and a cell has no memory of where its waves came from. The
+missing path is supplied by `shore_normal`, the direction to the nearest shore,
+which is discontinuous wherever a different piece of coast becomes the nearest
+one. Waves do not care which shore is nearest.
+
+### The idea: measure the energy, do not assume it
+
+Rays are integrated through the celerity field and each carries power that it
+deposits along its path. The energy density in a cell is what the rays leave
+behind:
+
+```
+E_cell = Σ_rays  P · ds / (c_g · A_cell)
+```
+
+`Kr` stops being a formula and becomes whatever the ray density turns out to be.
+
+**Why this fixes the seams:** wave celerity `c` is a function of **depth alone**.
+Depth is continuous wherever the bed is, so `c` is continuous, so the ray paths
+are. `shore_normal` is never read. Rotate every shore normal by 30° and the
+answer changes by **exactly zero**, against 0.448 m under `snell`.
+
+**Why not the textbook `Kr = √(b₀/b)`,** tracking the separation `b` of
+neighbouring rays: that divides by a quantity which goes to zero at caustics,
+which is exactly where refraction is most interesting. Accumulating energy has no
+such denominator — convergence raises the density because more rays *arrive*.
+
+### The ray equations
+
+For a steady bed, absolute frequency `ω` is conserved along a ray and the local
+wavenumber solves `ω² = gk·tanh(kd)`. With `c = ω/k`:
+
+```
+dx/ds = cos θ
+dy/ds = sin θ
+dθ/ds = (1/c)·[ sin θ · ∂c/∂x  −  cos θ · ∂c/∂y ]
+```
+
+The last line bends rays toward slower — that is, shallower — water. It is the
+whole of refraction in one term. Integrated with midpoint RK2, because rays turn
+through large angles over a few cells near a headland and forward Euler visibly
+cuts those corners.
+
+### A fan, not a beam
+
+A single beam gives hard geometric shadows behind every headland. Rays are
+launched as a **fan** weighted by the directional spreading function, which is
+not a refinement bolted on afterwards — a real sea arrives from a range of
+directions, and the edges of that range reach in behind obstacles.
+
+### What the rays cannot carry: the local wind sea
+
+Ray theory has no diffraction, so a cell no ray reaches gets exactly zero. On
+the straits export that was 1.84% of wet cells. More rays cannot fix it, because
+the missing energy is not energy the rays could have carried: **a sheltered bay
+is not calm — the wind is still blowing over it, and it grows its own
+short-fetch sea.**
+
+For each direction of the fan, `shelter_fetch` marches upwind and asks how far
+the water runs before it hits land.
+
+- A **blocked** direction contributes the energy the wind puts back over that
+  distance.
+- A **clear** direction contributes **exactly zero**, because the rays already
+  carried it. Adding it again would count the open sea twice.
+
+That second rule is what makes the term safe to *add* rather than clamp: on
+exposed water the floor is identically zero and the ray solution passes through
+untouched.
+
+The growth exponent is **energy ~ fetch^1.10**, not `^1.00`. `Hs ~ √fetch` is
+JONSWAP's dimensionless-energy fit, and it is not what integrating *this*
+spectrum gives — that sits a further `X̃^0.05` above it (§3). And because a short
+fetch moves the peak **up** rather than scaling the spectrum down, the floor is
+resolved per band: a sheltered bay is short chop with no swell in it. One number
+for it is 20× low in the short band and 5× high in the long one.
+
+### Two things it produces, not one
+
+| Field | Replaces | Validated against |
+|---|---|---|
+| `gain` | `Ks · Kr` together | Snell on a planar beach: 0.02 / 0.50 / 1.78% at 0 / 20 / 40° |
+| `theta` | the Snell angle | Snell's angle: **0.017°** at 20°, **0.038°** at 40° |
+
+The direction matters as much as the height and is easy to forget: a wave can
+turn without changing height, and on a mild slope at normal incidence it mostly
+does. It is accumulated as its two components and only becomes an angle through
+`atan2` — rays at +179° and −179° travel almost the same way and their arithmetic
+mean points backwards.
+
+`directionality`, the normalised resultant, travels with it. `theta` is always a
+number; behind a headland, where energy arrives round both sides at once, that
+number describes nothing, and this is what says so.
+
+### Cost, and why frames get faster
+
+The wave field is **stationary** given a bed and a sea state, so it is solved
+once per scene and cached — the same place the foam spin-up already sits. Three
+bands at ~15 s each on a 701 m export; a cache hit is 0.42 s. Per frame the cost
+is a bilinear sample, which is *cheaper* than `snell`'s per-band dispersion
+solve: 2.5 s against 4.1 s on the same points.
+
+Two settings exist because energy deposition is Monte Carlo and Monte Carlo on a
+fine grid is shot noise. `rays.suggest_settings` derives both from the grid:
+
+- **`decimate`** — solve on ~8 m cells. The gain field varies over the
+  *bathymetry's* length scale, hundreds of metres, so this loses nothing real and
+  multiplies ray visits per cell by `decimate²`.
+- **`smooth_m`** — a deposition kernel, ten solve cells wide. This is an
+  empirical noise control rather than a derived length, and is recorded as such
+  in §17 R3.
+
+### Verification
+
+| Check | Measured | Criterion |
+|---|---|---|
+| Reduces to Snell on a straight beach (height) | 0.02 / 0.50 / 1.78% | < 2% |
+| Reduces to Snell on a straight beach (angle) | 0.017° / 0.038° | < 0.5° |
+| Continuity — worst 4 m jump, straits export | **0.0123** | < 0.02 |
+| No cell annihilated — min gain | **0.0896** | > 0.05 |
+| Focusing survives — headland/bay gain | **1.34** | > 1.2 |
+| Energy conserved across a focusing shoal | **0.024%** | < 5% |
+| Independent of `shore_normal` | **exactly 0** | 0 |
+| Reproducible | bitwise | — |
+
+For comparison on the continuity check: `snell` scores 0.375 and `blend` 0.013 —
+and `blend` gets there only by discarding the focusing.
 
 ---
 
@@ -1511,13 +1666,17 @@ validation report.
    disagreement is measured (38.5° peak). **On real coastlines that is reversed**:
    Snell's `Kr` is derived for straight parallel contours and turns the medial
    axis of a distance-carved bed into a discontinuity in wave height — p99.9
-   one-cell jump 0.375 against 0.013 for the blend. Real coasts therefore ship
-   with `refraction: blend`, which is a workaround for a missing solver rather
-   than a preference; see §11.
+   one-cell jump 0.375 against 0.013 for the blend. The blend was a workaround
+   for a missing solver rather than a preference, and **is now superseded** by
+   `refraction: rays` (§11b), which is seam-free *and* keeps the focusing the
+   blend discards.
 5. **§5.1's "a rigorous treatment needs a mild-slope or Boussinesq solver ...
    unnecessary at 8 cm wave heights"** was a fair call at 8 cm and is not one at
-   0.4 m on a convoluted shoreline. [phase5b_refraction.md](phase5b_refraction.md)
-   designs the replacement and weighs the three candidate solvers.
+   0.4 m on a convoluted shoreline. It also proved to be a false choice: ray
+   integration with an energy accumulator (§11b) gets there for a one-off solve
+   of seconds, where mild-slope would be hours and Boussinesq would replace the
+   whole surface synthesis. [phase5b_refraction.md](phase5b_refraction.md)
+   weighs all three.
 6. **§6.3's displacement** says nothing about band-limiting the surface to the
    mesh Nyquist before sampling it. Without that, everything the mesh cannot
    represent folds down onto long wavelengths instead of being handed to the

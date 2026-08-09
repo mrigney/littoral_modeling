@@ -15,19 +15,20 @@ the derivations, what is exact and what is approximated — see
 ## Contents
 
 1. [What this package is](#1-what-this-package-is)
-2. [Installation](#2-installation)
-3. [Run a scene](#3-run-a-scene)
-4. [The config file](#4-the-config-file)
-5. [Using real terrain](#5-using-real-terrain)
-6. [Meshes and export](#6-meshes-and-export)
-7. [Animations](#7-animations)
-8. [Using the API](#8-using-the-api)
-9. [Module reference](#9-module-reference)
-10. [Reference numbers](#10-reference-numbers)
-11. [Validating a build](#11-validating-a-build)
-12. [Conventions](#12-conventions)
-13. [Troubleshooting](#13-troubleshooting)
-14. [Roadmap](#14-roadmap)
+2. [The words](#2-the-words)
+3. [Installation](#3-installation)
+4. [Run a scene](#4-run-a-scene)
+5. [The config file](#5-the-config-file)
+6. [Using real terrain](#6-using-real-terrain)
+7. [Meshes and export](#7-meshes-and-export)
+8. [Animations](#8-animations)
+9. [Using the API](#9-using-the-api)
+10. [Module reference](#10-module-reference)
+11. [Reference numbers](#11-reference-numbers)
+12. [Validating a build](#12-validating-a-build)
+13. [Conventions](#13-conventions)
+14. [Troubleshooting](#14-troubleshooting)
+15. [Roadmap](#15-roadmap)
 
 ---
 
@@ -53,7 +54,8 @@ There are no artistic parameters. The one number that looks like a knob,
 | A surface `h(x, y, t)` with exact analytic slopes | `surface.WaveTile` |
 | Multi-tile composite that hides FFT periodicity | `tiling.TileSet` |
 | Terrain: loaded export, or a synthetic Dean beach | `bathymetry.Bathymetry` |
-| Shoaling, refraction (`snell`/`blend`/`none`), depth-limited breaking | `nearshore.transform` |
+| Shoaling, refraction, depth-limited breaking | `nearshore.transform` |
+| Refraction by ray tracing, for real coastlines | `rays.BandedRayField` |
 | Swash wetness as a duty cycle, for the thermal channel | `nearshore.wetness_fraction` |
 | Foam with bounded, reproducible spin-up | `foam.FoamModel` |
 | Displaced mesh with per-vertex channels | `mesh.build_water_mesh` |
@@ -62,11 +64,66 @@ There are no artistic parameters. The one number that looks like a knob,
 ### What it does not do yet
 
 No LOD rings (§6.2 of the cookbook), no BSDF, no emissivity, no EMBER
-integration. See [Roadmap](#14-roadmap).
+integration. No currents, and no moving objects. See [Roadmap](#15-roadmap).
 
 ---
 
-## 2. Installation
+## 2. The words
+
+Everything the rest of this guide assumes you already know. Skip it if you work
+with waves; read it once if you do not.
+
+### The sea state — three numbers describe it
+
+| Term | Plain meaning |
+|---|---|
+| **Fetch** | How far the wind has blown over open water before reaching you. Longer fetch → bigger, longer waves. A single number here; a real closed bay has a different fetch in every direction. |
+| **U10** | Wind speed 10 m above the surface. The standard reference height, so 5 m/s means something specific. |
+| **Spectrum** | How much wave energy sits at each wave size and direction. Wind and fetch determine it; **everything else in this package is derived from it.** The model uses JONSWAP, an empirical fit to measurements from the North Sea. |
+
+### Describing waves
+
+| Term | Plain meaning |
+|---|---|
+| **`Hs`, significant wave height** | Roughly the average height of the largest third of waves — close to what an observer calls "the wave height". Formally `4·√(variance of the surface)`. |
+| **`Tp`, peak period** | Seconds between crests of the most energetic waves. |
+| **`λp`, peak wavelength** | Distance between those crests, in metres. Fixed by `Tp` in deep water: `λ ≈ 1.56·T²`. |
+| **`k`, wavenumber** | `2π/λ`. Just wavelength expressed so the maths is tidy. **Large `k` = short waves.** |
+| **Dispersion** | Long waves travel faster than short ones, and both slow down in shallow water. The relation `ω² = g·k·tanh(k·d)` ties frequency, wavelength and depth together; it is the backbone of the whole model. |
+| **Deep vs shallow** | Not absolute. A wave is in "deep" water when depth is more than about half its own wavelength — it cannot feel the bottom. A 35 m swell feels the bottom at 17 m; a 2 m ripple does not until 1 m. |
+
+### What happens as waves approach a beach
+
+| Term | Plain meaning |
+|---|---|
+| **Shoaling** | As a wave enters shallower water it slows down and bunches up, so it gets **taller**. Energy is conserved; it just gets packed into a shorter, slower wave. |
+| **Refraction** | The part of a crest in shallower water travels slower, so the crest **bends** to line up with the shore. It is why waves arrive almost parallel to a beach regardless of wind direction. It also concentrates energy on headlands and spreads it in bays. |
+| **Breaking** | A wave that gets too tall for the water it is in collapses. The trigger here is `Hs > γb·depth`, with `γb ≈ 0.78`. |
+| **Surf zone** | The band where waves are breaking. Can be a metre wide on a steep beach and tens of metres on a flat one. |
+| **Swash** | The thin sheet of water running up and back down the beach face. The band it covers is alternately wet and dry — which matters for a thermal sensor, so it is exported as a duty cycle rather than as geometry. |
+| **Foam** | Whitewater left behind by breaking. It is created where waves break, drifts, and decays with a half-life. |
+
+### Things that matter for rendering
+
+| Term | Plain meaning |
+|---|---|
+| **`mss`, mean square slope** | How rough the surface is at scales too small to draw as geometry. It is what makes sun glint a broad sheen rather than a mirror point. |
+| **Nyquist** | The shortest wave a grid can represent: you need at least two samples per wave. A 0.5 m grid cannot show anything under 1 m. Try, and those waves **alias** — they reappear masquerading as long waves that are not there. |
+| **FFT tile** | A square patch of water built by inverse Fourier transform. It is exactly periodic, so a single tile repeats visibly. This package sums several tiles of deliberately awkward sizes so the repeat is pushed far outside any scene. |
+| **The LOD invariant** | Roughness has to be counted once. Waves larger than a mesh cell are drawn as geometry; everything smaller is handed to the renderer as `mss`. `resolved + sub-mesh = total`, always. |
+
+### Two words this package uses precisely
+
+**Direction** always means the direction waves travel **toward**, measured
+counter-clockwise from east. Oceanographers often quote the direction weather
+comes *from*; this package never does.
+
+**Depth** is positive in water. The signed distance field `sdf` is the opposite —
+negative in water, positive inland — so it reads as "distance inland".
+
+---
+
+## 3. Installation
 
 Python 3.11+.
 
@@ -92,7 +149,7 @@ pytest                          # ~2 min
 
 ---
 
-## 3. Run a scene
+## 4. Run a scene
 
 One command turns a scene file into every artifact the model can produce.
 
@@ -126,24 +183,29 @@ Roughly 40 s for a small lake, a couple of minutes for a large coastal scene.
 
 ### The shipped scenes
 
-Three, deliberately unlike each other:
+Five, deliberately unlike each other. The first two need no external data; the
+rest want a terrain export you supply.
 
-| | `test_lake` | `coastal_bay` | `houdini_lake` |
-|---|---|---|---|
-| Terrain | synthetic, straight | synthetic, embayed | **loaded export** |
-| Wind / fetch | 5 m/s, 1 km | 12 m/s, 40 km | 5 m/s, 1 km |
-| Hs | 0.086 m | 1.43 m | 0.085 m |
-| Tp | 1.05 s | 4.75 s | 1.05 s |
-| Foreshore | 6.7% | 12.3% | 31.5% |
-| Breakers | spilling | plunging | plunging |
-| Swash | 0.38 m | 7.1 m | 0.38 m |
+| | `test_lake` | `coastal_bay` | `houdini_lake` | `straits_crop` |
+|---|---|---|---|---|
+| Terrain | synthetic, straight | synthetic, embayed | **loaded export** | **loaded export** |
+| Wind / fetch | 5 m/s, 1 km | 12 m/s, 40 km | 5 m/s, 1 km | 16 m/s, 7 km |
+| `Hs` | 0.085 m | 1.43 m | 0.085 m | 0.71 m |
+| `Tp` | 1.05 s | 4.75 s | 1.05 s | 2.95 s |
+| `λp` | 1.7 m | 35.3 m | 1.7 m | 13.6 m |
+| Foreshore | 6.7% | 12.3% | 31.5% | 4.2% |
+| Breakers | spilling | plunging | plunging | spilling |
+| Swash | 0.38 m | 7.1 m | 0.38 m | 3.1 m |
+
+(`straits` is the same coastline as `straits_crop` at 7.5 × 8.6 km rather than
+701 m — the same scene at survey scale.)
 
 Running two and diffing their `summary.md` is the fastest way to see which
 quantities are scene-dependent and which are structural.
 
 ---
 
-## 4. The config file
+## 5. The config file
 
 A scene is one YAML file. Copy `configs/test_lake.yaml` — every key is commented.
 
@@ -172,7 +234,7 @@ surface:
   choppiness: 1.0               # physical value; do not tune
 
 bathymetry:
-  source: null                  # path to a terrain export; see section 5
+  source: null                  # path to a terrain export; see section 6
   profile: planar               # synthetic only: planar | embayment
   shoreline: 400.0              # m, y of the waterline
   dean_a: 0.100                 # m^(1/3); omit to derive from grain_size
@@ -188,10 +250,12 @@ nearshore:
   breaker_index: 0.78           # gamma_b
   foam_halflife: 3.0            # s
   foam_coverage: 0.85           # coverage a continuously breaking cell reaches
-  refraction: blend             # snell | blend | none  (true/false still work)
-                                # 'snell' also scales wave HEIGHT by the ray
-                                # convergence Kr. On a complex coastline that
-                                # puts hard seams in the water -- see below.
+  refraction: snell             # snell | rays | blend | none
+                                #   snell  exact on a straight beach, seams on
+                                #          a real one
+                                #   rays   correct anywhere; needs a scene-level
+                                #          solve, which is cached
+                                # (true/false still parse, as snell/none)
   shoaling: true
 
 output:
@@ -204,117 +268,133 @@ output:
 
 ### Keys that need care
 
-**`surface.tiles`** — the three ways to get this wrong. **Tile sizes are not a
-scene-independent constant: they must be re-derived whenever `λ_p` changes.**
+**`surface.tiles`** — the surface is the sum of three FFT patches, each carrying
+a different band of wave sizes. **Their sizes are not a constant: re-derive them
+whenever `λp` changes**, which means whenever the wind or fetch does.
 
-- **Tiles must resolve the peak.** A tile's Nyquist is `π·n/size`, and at least
-  one tile needs a Nyquist comfortably above `k_p = 2π/λ_p`. Doubling the wind
-  roughly quadruples `λ_p`, so a tile set tuned for chop will not do for swell.
-  Asserted at run time and in the test suite.
-- **Put the first band edge near the peak.** This is the one that fails
-  silently. Resolving the peak only guards the *top* of the range; what decides
-  whether the bands do any work is the **first interior edge**, at
-  `0.35 · k_ref` where `k_ref` is the smallest tile Nyquist. Because JONSWAP's
-  shape is universal in `f/f_p`, the split follows from that edge alone:
+Three rules, and the second is the one that fails silently.
 
-  | first edge | band 1 then holds |
-  |---|---|
-  | 1.5 k_p | 71.9% |
-  | 2 k_p | 82.4% |
-  | 3 k_p | 91.5% |
-  | 8 k_p | 98.7% |
-  | 16 k_p | 99.7% |
+**1. Some tile must resolve the peak.** A tile's Nyquist is `π·n/size`, and at
+least one needs to be comfortably above `k_p = 2π/λp`. Doubling the wind roughly
+quadruples `λp`, so a tile set tuned for chop will not do for swell. Checked at
+load.
 
-  **Aim for 1.5–3 k_p.** Push it past ~8 and one band holds the whole spectrum,
-  so per-band shoaling and refraction collapse to a single representative
-  frequency — three FFTs a frame doing one band's work. Nothing else goes
-  wrong: `Hs` is still right, the bands still sum, the LOD invariant still
-  closes. `TileSet.sizing()` reports it and `run_scene` prints it.
+**2. The first band edge must land near the peak.** Rule 1 only guards the top
+of the range. What decides whether the bands *do anything* is the first interior
+edge, at `0.35·k_ref`, where `k_ref` is the **smallest** tile Nyquist. The
+spectrum's shape is universal, so that edge alone fixes the split:
 
-- **Keep sizes incommensurate.** 64/37/23, not 64/32/16. Sizes in simple ratios
-  re-align their lattices and the periodicity the construction exists to hide
-  comes straight back.
+| first edge at | band 1 then holds |
+|---|---|
+| 1.5 `k_p` | 71.9% |
+| **2 `k_p`** | **82.4%** |
+| 3 `k_p` | 91.5% |
+| 8 `k_p` | 98.7% |
+| 16 `k_p` | 99.7% |
 
-The two constraints pull in opposite directions, so give them to different
-tiles:
+**Aim for 1.5–3 `k_p`.** Past about 8, one band holds the whole spectrum and the
+other two FFTs compute nothing — shoaling and refraction, which depend on wave
+size, collapse to a single frequency. Nothing looks wrong when this happens:
+`Hs` is still right, the bands still sum, the LOD invariant still closes.
+`TileSet.sizing()` reports it, and `run_scene` prints it in `summary.md`.
+
+**3. Keep the sizes incommensurate.** 64/37/23, not 64/32/16. Sizes in simple
+ratios re-align their lattices and the repetition the whole construction exists
+to hide comes straight back.
+
+Rules 1 and 2 pull in opposite directions, so give them to different tiles:
 
 | | job | scale it with |
 |---|---|---|
-| tiles 1–2 | set where the bands split — their Nyquists fix `k_ref` | `λ_p` |
-| tile 3 | sets `k_max`, and so where the mesh/BSDF handoff lands | `output.mesh_dx` |
+| tiles 1–2 | fix `k_ref`, hence where the bands split | `λp` |
+| tile 3 | fix the shortest wave drawn, hence the mesh/`mss` handoff | `output.mesh_dx` |
 
-Resizing on that rule is a **redistribution, not a different sea** — measured on
-`straits_crop`, moving band 1 from 99.7% to 82.5% left `Hs`, `k_max` and
-resolved `mss` unchanged to four decimals. It is safe to apply to a scene you
-have already validated.
+Resizing on that rule is a **redistribution, not a different sea**: on
+`straits_crop`, moving band 1 from 99.7% to 82.5% left `Hs`, `k_max` and resolved
+`mss` unchanged to four decimals. Safe to apply to a scene you have validated.
 
-Two things that are *not* reasons to resize. Tile size has no measurable effect
-on spectral accuracy: holding the Nyquist fixed and growing the largest tile
-from 4.7 to 75 peak wavelengths moves the realised `Hs` by 0.08%, because the
-build integrates the spectrum over each grid cell rather than point-sampling it.
-And a tile smaller than the domain is normal, not a defect — incommensurate
-sizes and golden-angle rotations mean the *composite* does not repeat even
-though each tile does. What a short tile actually costs is variety: below about
-10 `λ_p` it holds only a handful of wave groups, and those recur.
+Two things that are *not* reasons to resize:
 
-**How many tiles?** Three, and changing that is almost never the answer.
-Splitting the same range into more bands converges fast — the band-count error
-on `Hs` is 0.95% at N=3, 0.39% at N=5, 0.18% at N=12 — while the FFT cost is
-linear in tile count. Extending the range *upward* matters far more (at 8 k_p
-you have 98.7% of the height variance but only 16% of the slope variance), but
-tiles are not the lever: raise `n` on the finest tile, or lower `mesh_dx`.
-Everything above the mesh Nyquist is already handed to the BSDF by
-`submesh_mss` under the LOD invariant `mss_resolved(dx) + mss_above(π/dx) =
-mss_total`, so extra tiles above it would be counted twice.
+- **Tile size does not affect accuracy.** Holding the Nyquist fixed and growing
+  the largest tile from 4.7 to 75 peak wavelengths moves `Hs` by 0.08%. What a
+  short tile costs is *variety* — below about 10 `λp` it holds only a few wave
+  groups, and those recur.
+- **A tile smaller than the domain is normal.** Each tile repeats; the
+  *composite* does not, which is what rule 3 buys.
 
-`band` values are *fractions*, not wavenumbers. They must be contiguous,
-disjoint, and span exactly `[0, 1]` — a gap silently loses variance, so it is
-rejected at load.
+**How many tiles? Three.** More bands over the same range converges fast — the
+error on `Hs` is 0.95% at three, 0.39% at five, 0.18% at twelve — while cost
+grows linearly. Reaching *shorter* waves matters much more (at 8 `k_p` you have
+98.7% of the height variance but only 16% of the slope variance), but tiles are
+not the lever there: raise `n` on the finest tile, or lower `mesh_dx`. Anything
+above the mesh Nyquist already reaches the renderer as `mss`, so a fourth tile
+up there would be counted twice.
+
+`band` values are *fractions* of `k_ref`, not wavenumbers. They must be
+contiguous, disjoint, and span exactly `[0, 1]`; a gap silently loses variance,
+so it is rejected at load.
 
 **`bathymetry.dx` / `surf_dx`** — `surf_dx` must be the finer of the two. It
 exists because the surf zone can be a metre wide, which a 1 m grid cannot resolve
 at all.
 
-**`nearshore.refraction`** — `snell`, `blend` or `none`.
+**`nearshore.refraction`** — four modes, and the choice depends entirely on
+whether your coastline is smooth.
 
-`snell` turns the waves *and* scales their height by the ray-convergence factor
-`Kr`. That factor is derived for **straight, parallel depth contours**, and it is
-computed from the direction to the nearest shore — which flips, by up to 180°,
-wherever a different piece of coast becomes the nearest one. On a real shoreline
-it produces hard seams radiating from every concavity. Measured on a Strait of
-Hormuz export at 0.25 m: p99.9 one-cell jump in wave amplitude **0.375** under
-`snell` against **0.013** under `blend`.
-
-| Your coast | Use | Cost |
+| Your coast | Use | What it costs |
 |---|---|---|
-| Synthetic, smooth | `snell` | none — the premise holds, exactly and for free |
-| Real, complex | `rays` | a scene-level solve, cached; **frames get faster** |
+| Synthetic, straight | `snell` | nothing — it is exact there |
+| Real, complex | **`rays`** | one solve per scene, cached; frames get *faster* |
 | Real, complex, in a hurry | `blend` | loses headland focusing |
+| Deep water only | `none` | — |
 
-`blend` turns the waves toward shore but leaves height alone. It was a
-workaround for a missing solver; the solver now exists.
+**Why the choice exists.** Refraction does two things: it turns the waves, and
+it changes their height by concentrating or spreading them. The classical formula
+for the height part, `Kr`, is derived for **straight, parallel depth contours**,
+and it is computed from the direction to the nearest shore. On a real coastline
+that direction flips — by up to 180° — wherever a different piece of coast
+becomes the nearest one. The result is hard seams radiating from every bay.
+Measured on a Strait of Hormuz export: worst jump in wave height between
+neighbouring cells **0.375** under `snell`, against **0.013** under `blend`.
 
-**`rays`** integrates rays through the celerity field and measures the energy
-that arrives, so `Kr` stops being assumed. It never reads `shore_normal` — the
-seams come from `shore_normal`, so they cannot survive that — while keeping the
-focusing `blend` discards. It is not the default because selecting it changes
-the wave height in almost every sheltered cell, and breaking, foam and wetness
-all follow that height.
+- **`snell`** turns the waves *and* scales their height. Exact on a straight
+  beach, seams on a real one.
+- **`blend`** turns them but leaves height alone. That is what makes it smooth,
+  and it means headlands stop focusing — real physics, discarded. It was a
+  workaround for a missing solver.
+- **`rays`** traces rays through the water and *measures* the energy that
+  arrives, so the height is no longer assumed from a formula. It never reads the
+  shore direction at all, so the seams cannot occur; and it keeps the focusing
+  `blend` throws away. It scores 0.0123 on that same jump measurement.
+- **`none`** does neither.
 
-It needs a ray field, solved once per scene and passed in:
+**`rays` is not the default**, because switching to it changes the wave height in
+almost every sheltered cell, and breaking, foam and wetness all follow height. It
+is a decision about what a scene renders, so it is left to you.
+
+**Using `rays`.** It needs a ray field, solved once per scene and passed in.
+`run_scene.py` does this for you when the config asks for it. From the API:
 
 ```python
 from pywave import rays
-rf = rays.BandedRayField.solve(bathy, cfg, tileset, cache_dir="runs/myscene/rays")
+rf = rays.BandedRayField.solve(bathy, cfg, tileset,
+                               cache_dir="runs/myscene/rays",
+                               **rays.suggest_settings(bathy))
 nf = nearshore.transform(tileset, bathy, cfg, x, y, t, ray_field=rf)
 m  = mesh.build_water_mesh(tileset, bathy, cfg, t=0.0, ray_field=rf)
 ```
 
-`transform` will not solve one for you: it is called many times per scene and
-the solve is seconds to minutes, so a forgotten `ray_field=` raises rather than
-quietly re-solving on every call. With `cache_dir` set, the second run of a
-scene reads it back — 17.6 s to 0.42 s on the straits crop — keyed by a hash of
-the bathymetry and sea state, so it invalidates when either changes.
+Three things worth knowing:
+
+- **Solve on the full-domain bathymetry**, not `fine=True`. The fine grid is a
+  narrow band around the waterline, and rays launched into a strip that thin
+  leave before they have refracted. The field carries its own grid, so sampling
+  it at fine-mesh points afterwards is exact.
+- **`transform` will not solve one for you.** It is called many times per scene,
+  so a forgotten `ray_field=` raises rather than silently re-solving each call.
+- **Set `cache_dir`.** The second run reads it back — 17.6 s to 0.42 s on the
+  straits crop — keyed by a hash of the bathymetry and sea state, so it
+  invalidates by itself when either changes.
 
 **`nearshore.foam_coverage`** — the coverage a continuously breaking cell settles
 at. The seeding rate is *derived* from this and the half life, so the equilibrium
@@ -329,7 +409,7 @@ naming the offending key.
 
 ---
 
-## 5. Using real terrain
+## 6. Using real terrain
 
 Point a scene at a Phase 4 terrain export and everything downstream follows —
 no code changes, because the synthetic bathymetry satisfies the same contract.
@@ -408,7 +488,7 @@ Everything is O(N²). The binding constraint is the foam spin-up, not memory. Th
 loader converts float32 → float64, so RAM is 2× the disk figure.
 ---
 
-## 6. Meshes and export
+## 7. Meshes and export
 
 ```bash
 python scripts/run_scene.py configs/my_scene.yaml --mesh
@@ -530,7 +610,7 @@ Two scenes for scale:
 | Result | good | patterned |
 
 If a fine enough mesh is unaffordable over the area you need, that is the
-problem LOD rings solve, and they are not built yet ([Roadmap](#14-roadmap)).
+problem LOD rings solve, and they are not built yet ([Roadmap](#15-roadmap)).
 Until then, bound the region rather than coarsening the whole domain.
 
 ### Why distant water looks patterned
@@ -699,7 +779,7 @@ delivery format needs rethinking before any C++ gets written.
 
 ---
 
-## 7. Animations
+## 8. Animations
 
 ```bash
 python scripts/animate.py                          # both views
@@ -726,7 +806,7 @@ would need a wave-by-wave model.
 
 ---
 
-## 8. Using the API
+## 9. Using the API
 
 ```python
 import numpy as np
@@ -788,7 +868,7 @@ This applies a *uniform* depth to the whole tile; spatially varying depth is wha
 
 ---
 
-## 9. Module reference
+## 10. Module reference
 
 | Module | Contents |
 |---|---|
@@ -800,6 +880,7 @@ This applies a *uniform* depth to the whole tile; spatially varying depth is wha
 | `tiling` | `TileSet`, band edges, periodic sampling, composition |
 | `bathymetry` | `Bathymetry` — loaded export or synthetic Dean beach |
 | `nearshore` | Shoaling, refraction, breaking, wetness, `transform` |
+| `rays` | Ray tracing for refraction on real coastlines; `BandedRayField` |
 | `foam` | `FoamModel`, bounded spin-up |
 | `mesh` | Water extent, triangulation, displacement, `TriMesh` |
 | `channels` | Per-vertex channel packing |
@@ -821,7 +902,12 @@ surface.WaveTile.build(size, n, u10, fetch, theta, seed, band, rotation, depth)
 tiling.TileSet.build(cfg, depth) / .sample(x, y, t)
 
 Bathymetry.from_export(directory) / .from_config(cfg, fine) / .sample(x, y)
-nearshore.transform(tileset, bathy, cfg, x, y, t, refraction, depth_limit)
+nearshore.transform(tileset, bathy, cfg, x, y, t, refraction, depth_limit,
+                    ray_field)
+
+rays.suggest_settings(bathy)                         -> solve settings for a grid
+rays.BandedRayField.solve(bathy, cfg, tileset, cache_dir=...)
+rays.BandedRayField.sample(x, y)                     -> [(gain, theta), ...]
 foam.FoamModel(bathy, equilibrium, half_life).evaluate(breaking_at, cg, t)
 mesh.build_water_mesh(...) / mesh.build_terrain_mesh(...)
 export.write_ply(mesh, path) / export.write_terrain_export(bathy, directory)
@@ -831,7 +917,7 @@ export.write_ply(mesh, path) / export.write_terrain_export(bathy, directory)
 
 ---
 
-## 10. Reference numbers
+## 11. Reference numbers
 
 `configs/test_lake.yaml`: U10 = 5 m/s, fetch = 1000 m, γ = 3.3, deep water.
 Every number is produced by the current code.
@@ -867,7 +953,7 @@ Every number is produced by the current code.
 
 ---
 
-## 11. Validating a build
+## 12. Validating a build
 
 ```bash
 pytest                      # ~2 min
@@ -908,7 +994,7 @@ full in the validation report.
 
 ---
 
-## 12. Conventions
+## 13. Conventions
 
 Fixed in `pywave/constants.py`, which every module imports. Read it before
 writing code against this package.
@@ -933,31 +1019,34 @@ frequency moment. See [algorithms.md §2](algorithms.md#2-conventions).
 
 ---
 
-## 13. Troubleshooting
+## 14. Troubleshooting
 
 | Symptom | Cause |
 |---|---|
 | `exceeds max_vertices` | Coarsen `--mesh-dx`, shrink `--mesh-region`, or raise the guard |
 | `no wet cells in region` | The region misses the water; check it against `summary.md`'s extents |
 | Mesh is a thin strip | The default region is a shoreline window — pass `--mesh-region` or `--mesh-full` |
-| Water looks patterned everywhere | `mesh_dx` too coarse for `λp` — check posts per peak wave in §6 |
-| Water looks patterned beyond a line | Pixel footprint, not the model. Orbit the camera to confirm; see §6 |
+| Water looks patterned everywhere | `mesh_dx` too coarse for `λp` — check posts per peak wave in §7 |
+| Water looks patterned beyond a line | Pixel footprint, not the model. Orbit the camera to confirm; see §7 |
 | Shorebreak too glassy | You are on constant `alpha`; read the `mss` channel, which rises ~20–30% in the last half-metre |
-| Bed pokes through the water at the shore | Fields coarser than the bed mesh; see §6 and run `check_clearance.py` |
+| Bed pokes through the water at the shore | Fields coarser than the bed mesh; see §7 and run `check_clearance.py` |
 | Bed pokes through in deep water | Not a resolution problem — the meshes disagree on `water_level` or CRS |
 | `lie outside the bed mesh` | The bed does not cover the water; it must be at least as large |
-| `scene.water_level is X but ... z_w = Y` | Make them match; see §5 |
+| `scene.water_level is X but ... z_w = Y` | Make them match; see §6 |
 | `does not name a terrain export` | The message lists every path tried |
 | `no shoreline` | The export is all water or all land |
 | `must be finer than dx` | `bathymetry.surf_dx` has to be smaller than `dx` |
 | `tile bands must be contiguous` | Bands must span `[0,1]` with no gap or overlap |
-| `no tile resolves k_p` | Tiles too coarse for this sea state; see §4 |
+| `no tile resolves k_p` | Tiles too coarse for this sea state; see §5 |
+| `needs a ray_field=` | `refraction: rays` was selected but nothing was passed; see §5 |
+| One band holds ~100% of the variance | Tiles sized for a different sea; see §5 rule 2 |
+| Ray solve is slow every run | No `cache_dir`, or the bathymetry changed |
 | Waves look wrong at the shore | Check `sign(sdf)`; it must be **negative in water** |
 | GIF is enormous | `pip install -e ".[video]"` for MP4 |
 
 ---
 
-## 14. Roadmap
+## 15. Roadmap
 
 | Phase | Deliverable | Status |
 |---|---|---|
@@ -966,11 +1055,14 @@ frequency moment. See [algorithms.md §2](algorithms.md#2-conventions).
 | 3 | Validation suite, generated report | **Implemented** |
 | 4 | Terrain export | **Loader implemented**; the Houdini side is yours |
 | 5 | `nearshore.py`, `foam.py` | **Implemented** |
+| 5b | `rays.py` — refraction on a complex coastline | **Implemented**, selectable as `refraction: rays`, not the default |
 | 6 | `mesh.py`, `channels.py`, `export.py` | **Implemented** — constant spacing; §6.2 LOD rings deferred |
 | 7 | Mitsuba `roughwater` BSDF plugin | Not started |
 | 8 | Spectral emissivity table | Not started |
 | 9 | EMBER integration | Not started |
 | 10 | Physical validation and traceability | Not started |
+| 11 | Boat wake, turbulent wake, bow spray | Architected — [phase11_wake_spray.md](phase11_wake_spray.md) |
+| 12 | Anchored objects in the water | Architected — [phase12_anchored_props.md](phase12_anchored_props.md) |
 
 Known open items:
 
@@ -978,5 +1070,13 @@ Known open items:
 - **`bottom_type`** is currently binary (wet/dry) and carries nothing beyond
   `depth > 0`. Phase 7/8 will want real sediment classes.
 - **Fetch is a single value** — a closed basin has a direction-dependent fetch.
+  The ray solver measures a *local* fetch per cell for sheltered water, but the
+  incident sea state is still one number.
+- **Foam is driven by shoaling alone** — `Scene.foam_field` computes wave height
+  without refraction or depth limiting, so foam does not see the refraction mode
+  at all. Measured on `coastal_bay`: 204,580 breaking cells against `transform`'s
+  182,303.
+- **Gate 5b.7** — the ray solver has no independent reference solve to check
+  against on a small domain.
 - **`tiling.band_edges`** has an unreachable upper guard, left as a tripwire
   against a future change to how `k_ref` is defined.
