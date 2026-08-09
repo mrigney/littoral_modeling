@@ -4,12 +4,12 @@
 
 | | |
 |---|---|
-| generated | 2026-08-08 22:38:07 UTC |
-| git_sha | `01503ecbca8c55e53cf42534781552e2cb12891a (working tree dirty)` |
+| generated | 2026-08-09 02:44:40 UTC |
+| git_sha | `a23250ca8f87ebc739b7ee66ca756bb43a4a3bac (working tree dirty)` |
 | scene | `configs/test_lake.yaml` |
 | python | 3.14.5 (Windows AMD64) |
 | numpy / scipy | 2.5.1 / 1.18.0 |
-| checks recorded | 169 |
+| checks recorded | 170 |
 | exit status | PASS |
 
 Every number below was measured by the test suite against the implementation in this commit. Tolerances are the gate criteria from `littoral-water-implementation-cookbook.md`, except where a deviation is recorded in [Gate deviations](#gate-deviations).
@@ -271,7 +271,8 @@ Notes:
 | mean \|gain\| difference between longest and shortest band | 0.030799 | -- | -- | -- | PASS |
 | min gain, shortest band over longest | 1.7493 | -- | -- | -- | PASS |
 | tiles surviving band limiting at the mesh Nyquist | 1 | 3 | 6.67e-01 | -- | PASS |
-| wdir channel: rays against snell | 49.5895 deg | -- | -- | -- | PASS |
+| wdir channel: rays against snell | 50.097 deg | -- | -- | -- | PASS |
+| sample() against the field's own cells | 0 | 0 | -- | 1.0e-09 | PASS |
 | solve parameters absent from the cache key | 0 | 0 | -- | 0.0e+00 | PASS |
 | cache key discrimination checks passed | 5 | 5 | 0.00e+00 | 0.0e+00 | PASS |
 | cache round-trip error in gain | 5.9552e-08 | 0 | -- | 1.0e-06 | PASS |
@@ -301,8 +302,9 @@ Notes:
 - **short-band / long-band floor ratio at 250 m fetch** -- bands read 0.0000 / 0.0003 / 0.5186 of their own deep-water energy. The short band peaks at 1.353 across this scene -- above 1, which the scalar form cannot express.
 - **mean |gain| difference between longest and shortest band** -- periods 2.80, 1.79, 1.06 s. Identical bands would read 0 and would mean the banded solve is paying 3x for one answer.
 - **min gain, shortest band over longest** -- per-band minima 0.298, 0.334, 0.521. Rising with band number is the signature of a short-fetch sea: the long waves go first. A scalar floor would flatten these together.
-- **tiles surviving band limiting at the mesh Nyquist** -- 4563 vertices, elevation range -0.2270 to +0.1838 m about still water. The field carries 3 bands and is trimmed to the surviving prefix by BandedRayField.matching.
-- **wdir channel: rays against snell** -- mean 12.41 deg. Near zero would mean the channel is ignoring the refraction mode and still reporting Snell while the vertices moved along the ray direction.
+- **tiles surviving band limiting at the mesh Nyquist** -- 4563 vertices, elevation range -0.2285 to +0.1846 m about still water. The field carries 3 bands and is trimmed to the surviving prefix by BandedRayField.matching.
+- **wdir channel: rays against snell** -- mean 12.36 deg. Near zero would mean the channel is ignoring the refraction mode and still reporting Snell while the vertices moved along the ray direction.
+- **sample() against the field's own cells** -- 64 cell centres, sampled through world coordinates and read directly; the bathymetry agrees at the same points to 0.0e+00 m. Exact agreement on both means the grid travelled with the field and shares the bed's registration.
 - **solve parameters absent from the cache key** -- walked 10 parameters off solve()'s signature: n_dirs, rays_per_dir, spread_deg, ds_frac, break_depth, min_hits, decimate, smooth_m, wind_sea, band. Any that failed to move the digest would silently return another configuration's field.
 - **cache key discrimination checks passed** -- same inputs twice: True; one cell 1 cm deeper: True; u10 +0.1 m/s: True; omega +0.1%: True; a default passed explicitly: True
 - **cache round-trip error in gain** -- direction agrees to 5.94e-08 rad. Fields are stored as float32, so this is the storage precision and nothing else.

@@ -920,6 +920,63 @@ def test_the_wdir_channel_follows_the_mode_the_geometry_used(record):
     assert worst > 1.0, "wdir is not tracking the ray direction"
 
 
+def test_the_field_carries_its_own_grid(record):
+    """A scene has more than one bathymetry grid, and they are not compatible.
+
+    `run_scene` holds a coarse grid for the channels and a *cropped, finer* one
+    for the mesh -- on the test lake, 1 m over y = 0..1000 against 0.25 m over
+    y = 360..410. A `sample(bathy, x, y)` that converted world coordinates using
+    whichever grid the caller happened to be holding would read the right field
+    through the wrong ruler, and return plausible numbers from the wrong place.
+
+    So the field carries the grid it was solved on and `sample` takes world
+    coordinates only. This asserts the answer does not depend on what the caller
+    holds, by asking for the same points via both grids.
+    """
+    from pywave import load_config, rays
+    from pywave.bathymetry import Bathymetry
+
+    cfg = load_config(REPO / "configs" / "test_lake.yaml")
+    coarse = Bathymetry.from_config(cfg)
+    fine = Bathymetry.from_config(cfg, fine=True)
+    assert (coarse.meta.dx != fine.meta.dx
+            and coarse.meta.extent != fine.meta.extent), \
+        "this test is pointless if the two grids agree"
+
+    bathy = Bathymetry.dean_beach(nx=48, ny=48, dx=8.0, shoreline_y=300.0,
+                                  max_depth=6.0)
+    rf = rays.RayField.solve(bathy, cfg, 1.0, n_dirs=3, rays_per_dir=60)
+
+    ax, ay = bathy.meta.axes()
+    X, Y = np.meshgrid(ax[4:-4:5], ay[4:-4:5])
+    g, th = rf.sample(X.ravel(), Y.ravel())
+
+    # The field's own grid must be what it was solved on, whatever else exists,
+    # and in the CELL-CENTRE convention `Bathymetry.sample` uses. A corner
+    # origin here would register the gain half a solve cell off the bed.
+    assert rf.dx == bathy.meta.dx
+    assert rf.origin == (bathy.meta.extent[0] + 0.5 * bathy.meta.dx,
+                         bathy.meta.extent[2] + 0.5 * bathy.meta.dx)
+    on_grid = rf.gain[4:-4:5, 4:-4:5].ravel()
+    worst = float(np.abs(g - on_grid).max())
+
+    # ... and the bed must answer at the same points, or the two are registered
+    # against different rulers however self-consistent each one is.
+    d_sampled, _, _ = bathy.sample(X.ravel(), Y.ravel())
+    d_direct = bathy.depth[4:-4:5, 4:-4:5].ravel()
+    d_err = float(np.abs(d_sampled - d_direct).max())
+
+    record("5b", "sample() against the field's own cells", worst, reference=0.0,
+           tol=1e-9, unit="",
+           note=f"{g.size} cell centres, sampled through world coordinates and "
+                f"read directly; the bathymetry agrees at the same points to "
+                f"{d_err:.1e} m. Exact agreement on both means the grid "
+                f"travelled with the field and shares the bed's registration.",
+           passed=worst < 1e-9 and d_err < 1e-9)
+    assert worst < 1e-9 and d_err < 1e-9
+    assert np.all(np.isfinite(th))
+
+
 # ---------------------------------------------------------------------------
 # Caching -- the solve is minutes, so it has to live on disk
 # ---------------------------------------------------------------------------

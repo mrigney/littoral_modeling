@@ -507,7 +507,7 @@ def transform(
             # measured the energy that arrived, which is Ks and Kr at once --
             # so there is no separate `ks` to multiply here. Multiplying by one
             # would apply shoaling twice.
-            gain, theta = ray_field[i].sample(bathy, x, y)
+            gain, theta = ray_field[i].sample(x, y)
             gain = np.where(depth > 0.0, gain, 0.0)
             weights.append(gain)
             rotations.append(_wrap(theta - theta_deep))

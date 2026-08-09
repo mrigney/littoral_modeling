@@ -469,9 +469,13 @@ forced by a measurement rather than foreseen:
 
 | | |
 |---|---|
-| `run_scene` integration | solve once per scene, cache, report timing |
-| Deciding the default | needs the measurements below in front of a human |
+| ~~`run_scene` integration~~ | **done** — `Scene.ray_field()`, cached to `runs/<scene>/rays/`, reported in `summary.md` |
+| Deciding the default | the measurements below are what it needs; the call is a human's |
 | 5b.7 | a mild-slope reference solver on a small domain |
+
+`run_scene` on `coastal_bay` with `refraction: rays` takes 392 s cold and 135 s
+warm, against ~100 s for the same scene on `snell` — so the marginal cost of
+rays, once cached, is about 35 s per scene run, and zero per frame.
 
 The default is deliberately not being changed as part of the wiring. Selecting
 `rays` moves the wave height in almost every sheltered cell, and breaking, foam,
@@ -490,7 +494,29 @@ setting because it pins `Kr = 1`. Per-frame cost is 2.5 s against `blend`'s 2.3
 and `snell`'s 4.1: sampling a precomputed field is cheaper than solving
 dispersion per band, so the wiring makes frames *faster*, not slower.
 
-What those numbers do not yet show is the interaction with foam. `coastal_bay`
-already saturates at coverage 1.0 across its surf band, and more energy in
-sheltered water can only push that further in. That should be measured before
-the default moves, not after.
+### The foam interaction, measured
+
+The worry was that more energy in sheltered water would widen the surf zone and
+push foam toward saturation. **It does the opposite.** Breaking is flagged from
+the *unlimited* height, driven at each cell's own refracted `Hs`:
+
+| driver | coastal_bay breaking | foam mean | straits_crop breaking | foam mean |
+|---|---|---|---|---|
+| `snell` | 4.92% | 0.0204 | 11.68% | 0.0695 |
+| `blend` | 5.31% | 0.0227 | 13.64% | 0.0840 |
+| **`rays`** | **4.67%** | **0.0188** | **10.21%** | **0.0569** |
+
+Rays give the *narrowest* surf zone of the three — 18% less foam than `snell` on
+the straits — because `snell` reaches the waterline with `Ks` diverging and `Kr`
+spiking off a discontinuous normal, while the ray field arrives smooth. Nothing
+saturates under any mode: coverage inside the surf band averages 0.41 and peaks
+at 0.74 against an equilibrium of 0.85.
+
+**A separate finding, and the larger one.** `Scene.foam_field` drives foam from
+a *shoaling-only* `Hs` — `Hs_deep * Ks`, with no refraction and no depth limit —
+rather than from `transform`. That is a pre-existing inconsistency independent
+of this phase: foam has never seen refraction at all, in any mode. Measured on
+`coastal_bay` it flags 204,580 breaking cells against `snell`'s 182,303 and
+`rays`' 172,939. Not catastrophic, and not this phase's business to change, but
+it means the foam in every rendered scene is keyed to a wave height no other
+channel uses.

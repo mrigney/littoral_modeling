@@ -248,8 +248,11 @@ class Shoreline:
 
     def frame(self, t: float):
         cfg = self.cfg
-        nf = nearshore.transform(self.scene.onshore_tileset, self.bathy,
-                                 self.scene.onshore_cfg, self.X, self.Y, t)
+        nf = nearshore.transform(
+            self.scene.onshore_tileset, self.bathy, self.scene.onshore_cfg,
+            self.X, self.Y, t,
+            ray_field=self.scene.ray_field(self.scene.onshore_cfg,
+                                           self.scene.onshore_tileset))
 
         # Land: dry sand darkened by the instantaneous swash, so the wet band
         # advances and retreats at the peak period.

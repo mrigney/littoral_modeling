@@ -112,6 +112,42 @@ class Scene:
     def onshore_tileset(self):
         return self._memo("onts", lambda: tiling.TileSet.build(self.onshore_cfg))
 
+    # -- the ray field, when the scene asks for it ---------------------------
+
+    def ray_field(self, cfg=None, tileset=None):
+        """The :class:`~pywave.rays.BandedRayField` for a cfg, or ``None``.
+
+        ``None`` unless ``nearshore.refraction`` is ``"rays"``, so every call
+        site can pass ``ray_field=scene.ray_field()`` unconditionally and the
+        other modes cost nothing.
+
+        Solved on the **coarse, full-domain** grid and never on ``fine_bathy``.
+        That is not an optimisation: the fine grid is a cropped band around the
+        waterline -- 50 m of it on the test lake -- and rays launched into a
+        strip that thin enter and leave before they have refracted. Sampling it
+        at fine-grid points is fine, because the field carries its own grid in
+        world coordinates.
+
+        Memoised per wind direction, because ``write_channels`` transforms with
+        ``onshore_cfg`` and a field solved for a different wind is a different
+        field.
+        """
+        from pywave import rays
+
+        cfg = cfg if cfg is not None else self.cfg
+        if getattr(cfg.nearshore, "refraction", "snell") != "rays":
+            return None
+        tileset = tileset if tileset is not None else self.tileset
+        key = f"rays:{cfg.wind.direction_rad:.6f}"
+
+        def make():
+            cache = ROOT / "runs" / cfg.name / "rays"
+            return rays.BandedRayField.solve(
+                self.bathy, cfg, tileset, cache_dir=cache,
+                **rays.suggest_settings(self.bathy))
+
+        return self._memo(key, make)
+
     # -- scene-derived scales, so figures adapt to any config ----------------
 
     @property
@@ -682,7 +718,8 @@ def fig_nearshore(scene):
     beach = scene.fine_bathy
 
     x, y = scene.surf_transect()
-    nf = nearshore.transform(ts, beach, cfg_on, x, y, 0.0)
+    nf = nearshore.transform(ts, beach, cfg_on, x, y, 0.0,
+                             ray_field=scene.ray_field(cfg_on, ts))
     offshore = np.hypot(x - scene.shore_ref[0], y - scene.shore_ref[1])
 
     fig, axes = plt.subplots(2, 2, figsize=(11.5, 6.4))

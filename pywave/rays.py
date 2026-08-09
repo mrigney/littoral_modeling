@@ -70,8 +70,8 @@ import numpy as np
 from .constants import G
 
 __all__ = ["celerity_fields", "launch_line", "trace_rays", "shelter_fetch",
-           "band_fetch_response", "wind_sea_floor", "RayField",
-           "BandedRayField", "CACHE_VERSION"]
+           "band_fetch_response", "wind_sea_floor", "suggest_settings",
+           "RayField", "BandedRayField", "CACHE_VERSION"]
 
 
 CACHE_VERSION = 1
@@ -592,6 +592,34 @@ def wind_sea_floor(depth, dx, thetas, weights, scene_fetch, *,
     return out
 
 
+def suggest_settings(bathy, *, target_solve_dx: float = 8.0,
+                     n_dirs: int = 15, rays_per_dir: int = 1500) -> dict:
+    """Solve settings scaled to a bathymetry, so a scene file needs none.
+
+    The defaults on :meth:`RayField.solve` are the ones the gates are stated
+    at -- ``decimate=1`` and no smoothing -- which on a real export means
+    solving 4 million cells at full resolution and reading back shot noise.
+    They are right for a gate and wrong for a scene.
+
+    Two knobs actually need to follow the grid:
+
+    * ``decimate`` targets a solve spacing of about 8 m. The gain field varies
+      over the *bathymetry's* length scale, hundreds of metres, so this loses
+      nothing real and multiplies ray visits per cell by ``decimate**2``.
+    * ``smooth_m`` is set to ten solve cells. That is not derived from physics
+      -- it is a Monte Carlo noise control -- but it reproduces the 80 m kernel
+      measured to satisfy gate 5b.2 on an 8 m solve grid, and it scales with the
+      thing the noise actually depends on.
+
+    Stated in one place because otherwise every caller invents its own, and the
+    numbers stop being comparable between scenes.
+    """
+    dec = max(1, int(round(float(target_solve_dx) / float(bathy.meta.dx))))
+    solve_dx = dec * float(bathy.meta.dx)
+    return {"decimate": dec, "n_dirs": int(n_dirs),
+            "rays_per_dir": int(rays_per_dir), "smooth_m": 10.0 * solve_dx}
+
+
 # ---------------------------------------------------------------------------
 # The scene-level solve
 # ---------------------------------------------------------------------------
@@ -626,6 +654,19 @@ class RayField:
     sea that has no single direction.
     """
     omega: float
+    origin: tuple[float, float] = (0.0, 0.0)
+    """World coordinates of cell ``[0, 0]`` on the grid this was solved on [m].
+
+    Carried by the field rather than supplied at sample time, and that is not a
+    convenience. A scene has more than one bathymetry grid -- ``run_scene`` uses
+    a coarse one for channels and a *cropped, finer* one for the mesh -- so a
+    ``sample(bathy, x, y)`` that converted world to grid coordinates using
+    whichever grid the caller happened to hold would read the right field
+    through the wrong ruler. Measured on the test lake, coarse is 1 m over
+    y = 0..1000 and fine is 0.25 m over y = 360..410.
+    """
+    dx: float = 1.0
+    """Cell size of that grid [m]."""
     meta: dict = field(default_factory=dict)
 
     @classmethod
@@ -689,7 +730,17 @@ class RayField:
         depth = full_depth[::dec, ::dec] if dec > 1 else full_depth
         ny, nx = depth.shape
         dx = float(bathy.meta.dx) * dec
-        x0g, y0g = bathy.meta.extent[0], bathy.meta.extent[2]
+        # World position of grid cell [0, 0]'s **centre**, which is the
+        # convention `Bathymetry.sample` uses ((x - x0)/dx - 0.5) and therefore
+        # the one every other field in the package is registered against. Using
+        # the corner here instead put the whole gain field half a *solve* cell
+        # off the bed it was computed from -- 4 m at decimate=32 on the straits
+        # crop, which is the width of the shoreline itself.
+        #
+        # The same value serves the decimated grid: striding keeps cell 0, so
+        # solve cell j is full cell j*dec and the first centre does not move.
+        half = 0.5 * float(bathy.meta.dx)
+        x0g, y0g = bathy.meta.extent[0] + half, bathy.meta.extent[2] + half
         ds = ds_frac * dx
 
         # Directions, weighted by how much energy the sea actually sends each way.
@@ -836,6 +887,10 @@ class RayField:
 
         return cls(gain=gain, hits=hits, theta=theta,
                    directionality=directionality, omega=float(omega),
+                   # The stored fields are always at full bathymetry
+                   # resolution, whatever `decimate` was, so this is the full
+                   # grid's cell-centre origin and spacing.
+                   origin=(float(x0g), float(y0g)), dx=float(bathy.meta.dx),
                    meta={"n_dirs": int(n_dirs), "rays_per_dir": int(rays_per_dir),
                          "spread_deg": float(spread_deg), "ds": float(ds),
                          "d_ref": d_ref, "break_depth": float(break_depth),
@@ -911,6 +966,8 @@ class RayField:
             theta=self.theta.astype(np.float32),
             directionality=self.directionality.astype(np.float32),
             omega=np.float64(self.omega),
+            origin=np.asarray(self.origin, dtype=np.float64),
+            dx=np.float64(self.dx),
             meta=np.array(json.dumps(self.meta, default=str)),
         )
         return path
@@ -931,6 +988,8 @@ class RayField:
                        theta=z["theta"].astype(np.float64),
                        directionality=z["directionality"].astype(np.float64),
                        omega=float(z["omega"]),
+                       origin=(float(z["origin"][0]), float(z["origin"][1])),
+                       dx=float(z["dx"]),
                        meta=json.loads(str(z["meta"])))
 
     @classmethod
@@ -954,15 +1013,18 @@ class RayField:
         rf.save(cache_dir, key)
         return rf
 
-    def sample(self, bathy, x, y):
-        """``(gain, theta)`` at arbitrary scene coordinates.
+    def sample(self, x, y):
+        """``(gain, theta)`` at arbitrary **world** coordinates.
+
+        Uses the grid this field was solved on, not one passed in -- see
+        :attr:`origin`.
 
         The direction is interpolated as a unit vector and recombined with
         ``atan2``, not interpolated as an angle -- halfway between +179 and
         -179 degrees is 180, not 0.
         """
-        gx = (np.asarray(x, dtype=np.float64) - bathy.meta.extent[0]) / bathy.meta.dx
-        gy = (np.asarray(y, dtype=np.float64) - bathy.meta.extent[2]) / bathy.meta.dx
+        gx = (np.asarray(x, dtype=np.float64) - self.origin[0]) / self.dx
+        gy = (np.asarray(y, dtype=np.float64) - self.origin[1]) / self.dx
         u = _bilinear(np.cos(self.theta), gx, gy)
         v = _bilinear(np.sin(self.theta), gx, gy)
         return _bilinear(self.gain, gx, gy), np.arctan2(v, u)
@@ -1066,6 +1128,6 @@ class BandedRayField:
         return BandedRayField(bands=self.bands[:n], band_edges=self.band_edges[:n],
                               meta=dict(self.meta, truncated_from=len(self.bands)))
 
-    def sample(self, bathy, x, y):
-        """``[(gain, theta), ...]``, one pair per band, at scene coordinates."""
-        return [rf.sample(bathy, x, y) for rf in self.bands]
+    def sample(self, x, y):
+        """``[(gain, theta), ...]``, one pair per band, at world coordinates."""
+        return [rf.sample(x, y) for rf in self.bands]

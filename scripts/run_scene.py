@@ -67,6 +67,32 @@ from pywave import __version__, load_config, moments, nearshore, spectrum  # noq
 # ---------------------------------------------------------------------------
 
 
+def _ray_field_summary(scene) -> dict | None:
+    """What the ray solve did, or ``None`` when the scene did not ask for one.
+
+    Solving it here is free when it is wanted: `Scene.ray_field` memoises, and
+    every other call site in the run wants the same object.
+    """
+    rf = scene.ray_field()
+    if rf is None:
+        return None
+    first = rf[0].meta
+    return {
+        "n_bands": len(rf),
+        "periods_s": rf.meta["periods_s"],
+        "band_edges_rad_m": [list(e) for e in rf.band_edges],
+        "solve_dx": first["solve_dx"],
+        "decimate": first["decimate"],
+        "smooth_m": first["smooth_m"],
+        "n_dirs": first["n_dirs"],
+        "rays_per_dir": first["rays_per_dir"],
+        "mean_visits": first["mean_visits"],
+        "sheltered_cells": first["sheltered_cells"],
+        "wet_cells": first["wet_cells"],
+        "from_cache": rf.meta["from_cache"],
+    }
+
+
 def scene_summary(scene) -> dict:
     """Every derived quantity worth reporting, computed from the config alone."""
     cfg = scene.cfg
@@ -175,6 +201,10 @@ def scene_summary(scene) -> dict:
             "runup_m": runup,
             "swash_width_m": float(nearshore.swash_width(runup, slope)),
             "foam_halflife_s": cfg.nearshore.foam_halflife,
+            "refraction": cfg.nearshore.refraction,
+            # Recorded so a run can be asked what was actually solved, rather
+            # than only what the config asked for.
+            "ray_field": _ray_field_summary(scene),
         },
         "provenance": {
             "pywave_version": __version__,
@@ -261,6 +291,16 @@ def write_summary_md(summary: dict, path: Path) -> None:
     ]
     if sz["notes"]:
         lines += ["", "> **Tile sizing.** " + " ".join(sz["notes"])]
+    ray = s["nearshore"].get("ray_field")
+    if ray:
+        lines += [
+            "",
+            f"Refraction is solved by **ray integration** — {ray['n_bands']} "
+            f"bands at periods {', '.join(f'{p:.2f}' for p in ray['periods_s'])} s, "
+            f"on a {ray['solve_dx']:g} m solve grid with a {ray['smooth_m']:g} m "
+            f"deposition kernel. {ray['from_cache']} of {ray['n_bands']} came "
+            f"from cache.",
+        ]
     lines += [
         "",
         "## Level of detail",
@@ -326,7 +366,9 @@ def write_channels(scene, out_dir: Path) -> dict:
     ax_x, ax_y = b.meta.axes()
     X, Y = np.meshgrid(ax_x, ax_y, indexing="xy")
     nf = nearshore.transform(scene.onshore_tileset, b, scene.onshore_cfg,
-                             X.ravel(), Y.ravel(), 0.0)
+                             X.ravel(), Y.ravel(), 0.0,
+                             ray_field=scene.ray_field(scene.onshore_cfg,
+                                                       scene.onshore_tileset))
     foam, _ = scene.foam_field()
 
     def r(a):
@@ -578,7 +620,8 @@ def main() -> int:
         wm = pw_mesh.build_water_mesh(
             scene.tileset, scene.fine_bathy, cfg, t=args.mesh_t,
             dx=args.mesh_dx, region=region, max_vertices=budget,
-            foam=foam_field, foam_bathy=scene.fine_bathy)
+            foam=foam_field, foam_bathy=scene.fine_bathy,
+            ray_field=scene.ray_field())
         wstats = wm.validate()
         written = pw_export.export_frame(wm, mesh_dir, "water_0000",
                                          obj=args.mesh_obj)

@@ -196,6 +196,21 @@ def main() -> int:
         tuple(bathy.meta.extent[i] for i in (0, 2, 1, 3))
     budget = args.mesh_max_vertices or cfg.output.mesh_max_vertices
 
+    # Solved on the coarse, full-domain grid rather than the fine one above:
+    # `fine=True` returns a cropped band around the waterline, and rays launched
+    # into a strip that thin leave before they have refracted. The field carries
+    # its own grid, so sampling it at fine-mesh points is exact regardless.
+    ray_field = None
+    if cfg.nearshore.refraction == "rays":
+        from pywave import rays as pw_rays
+        coarse = Bathymetry.from_config(cfg)
+        print("  ray field ...", flush=True)
+        ray_field = pw_rays.BandedRayField.solve(
+            coarse, cfg, ts, cache_dir=out / "rays",
+            **pw_rays.suggest_settings(coarse))
+        print(f"    {len(ray_field)} bands, "
+              f"{ray_field.meta['from_cache']} from cache")
+
     foam_track = None
     if not args.no_foam:
         print("  foam spin-up ...", flush=True)
@@ -218,7 +233,8 @@ def main() -> int:
         foam = foam_track.field if foam_track else None
         return pw_mesh.build_water_mesh(
             ts, bathy, cfg, t=t, dx=dx, region=region, max_vertices=budget,
-            foam=foam, foam_bathy=bathy if foam is not None else None)
+            foam=foam, foam_bathy=bathy if foam is not None else None,
+            ray_field=ray_field)
 
     m0 = build(args.t0)
     pw_export.write_ply(m0, mesh_dir / "water.ply")

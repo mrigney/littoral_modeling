@@ -128,7 +128,7 @@ def _local_wave_direction(cfg, bathy, x, y, depth, refraction: str,
         # energy -- the same reduction the other branches make by evaluating at
         # `f_p`. The caller picks it, because which band dominates is a property
         # of the tile sizing rather than of position in the list.
-        _, theta = ray_field[band].sample(bathy, x, y)
+        _, theta = ray_field[band].sample(x, y)
     elif refraction == "none":
         theta = np.full(np.shape(depth), theta_deep, dtype=np.float64)
     else:
