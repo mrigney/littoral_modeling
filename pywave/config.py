@@ -315,7 +315,7 @@ class Config:
     @property
     def lambda_p(self) -> float:
         """Peak wavelength [m]."""
-        return 2.0 * np.pi / self.k_p
+        return peak_wavelength(self.wind.speed, self.wind.fetch)
 
     def spectrum_kwargs(self) -> dict:
         """Keyword bundle accepted by the ``spectrum``/``moments`` entry points."""
@@ -341,9 +341,86 @@ def _refraction_mode(raw) -> str:
     return mode
 
 
+def peak_wavelength(u10: float, fetch: float) -> float:
+    """Deep-water peak wavelength [m] for a fetch-limited sea.
+
+    Module level rather than only a ``Config`` property, because ``load_config``
+    needs it while the ``Config`` is still being assembled -- ``size: auto``
+    tiles are resolved against it before ``SurfaceConfig`` exists.
+    """
+    omega_p = 2.0 * np.pi * jonswap_params(u10, fetch)[1]
+    return 2.0 * np.pi / (omega_p**2 / G)
+
+
+def _is_auto(size) -> bool:
+    return isinstance(size, str) and size.strip().lower() == "auto"
+
+
 def _tile_from_dict(d: dict) -> TileConfig:
     return TileConfig(size=float(d["size"]), n=int(d["n"]),
                       band=(float(d["band"][0]), float(d["band"][1])))
+
+
+def _tiles_from_raw(raw_tiles, lambda_p: float) -> tuple[TileConfig, ...]:
+    """Build the tile set, resolving any ``size: auto`` against ``lambda_p``.
+
+    A tile written ``{size: auto, n: 512, band: [0.0, 0.35]}`` takes its size
+    from the scene's own peak wavelength instead of a number copied from another
+    config -- which is how every mis-sized scene in this repository got that way.
+    See ``docs/tile_autosizing.md``.
+
+    Two rules, both enforced here rather than left to the reader:
+
+    * **``auto`` tiles must be the low-band ones**, contiguously from the
+      bottom.  The derivation solves the first tile exactly (it sets ``k_ref``,
+      and therefore every band edge) and sizes the rest relative to it; an
+      ``auto`` tile above a pinned one has nothing well-defined to be relative
+      to.
+    * **The top tile must not be ``auto``.**  It sets ``k_max``, where the
+      mesh/BSDF handoff lands, which is a rendering decision and not a property
+      of the sea.  Letting it follow ``lambda_p`` at fixed ``n`` coarsens its
+      grid: on ``straits`` that cost 36% of the resolved slope variance.
+
+    Configs with every size written out are untouched, which is what keeps
+    existing scenes reproducible byte for byte.
+    """
+    from .tiling import derive_tile_sizes
+
+    entries = [
+        {"size": t["size"], "n": int(t["n"]),
+         "band": (float(t["band"][0]), float(t["band"][1]))}
+        for t in raw_tiles
+    ]
+    if not any(_is_auto(e["size"]) for e in entries):
+        return tuple(_tile_from_dict(e) for e in entries)
+
+    # Work in band order; the file may list tiles in any order, and which tile
+    # is "first" is a statement about bands, not about lines in a YAML file.
+    order = sorted(range(len(entries)), key=lambda i: entries[i]["band"][0])
+    auto = [pos for pos, i in enumerate(order) if _is_auto(entries[i]["size"])]
+
+    if auto != list(range(len(auto))):
+        raise ValueError(
+            "surface.tiles: `size: auto` tiles must be the lowest bands, with "
+            "no pinned tile below an automatic one. The derivation solves the "
+            "lowest-band tile exactly and sizes the others relative to it.")
+    if len(auto) == len(entries):
+        raise ValueError(
+            "surface.tiles: the highest-band tile cannot be `size: auto`. It "
+            "sets k_max, where the mesh/BSDF handoff lands, which is a "
+            "rendering decision rather than a property of the sea -- give it a "
+            "size chosen for the finest mesh that will sample it.")
+
+    derived = derive_tile_sizes(
+        lambda_p,
+        [entries[order[p]]["n"] for p in auto],
+        [entries[order[p]]["band"][1] for p in auto],
+        pinned=[(float(entries[order[p]]["size"]), entries[order[p]]["n"])
+                for p in range(len(auto), len(order))],
+    )
+    for pos, size in zip(auto, derived):
+        entries[order[pos]]["size"] = size
+    return tuple(_tile_from_dict(e) for e in entries)
 
 
 def load_config(path: str | Path) -> Config:
@@ -380,7 +457,10 @@ def load_config(path: str | Path) -> Config:
         seed=int(spec_raw.get("seed", 20260801)),
     )
     surface = SurfaceConfig(
-        tiles=tuple(_tile_from_dict(t) for t in surf_raw["tiles"]),
+        # `size: auto` is resolved here, against this scene's own peak
+        # wavelength, so nothing downstream ever sees a tile without a size.
+        tiles=_tiles_from_raw(surf_raw["tiles"],
+                              peak_wavelength(wind.speed, wind.fetch)),
         choppiness=float(surf_raw.get("choppiness", 1.0)),
     )
     nearshore = NearshoreConfig(

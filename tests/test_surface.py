@@ -20,6 +20,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import yaml
 from scipy.stats import kurtosis, skew
 
 from pywave import moments, spectrum, surface, tiling
@@ -576,3 +577,202 @@ def test_resizing_tiles_redistributes_energy_without_changing_it(record):
                 f"is a redistribution, not a different sea.",
            passed=d_hs < 1e-3 and d_mss < 1e-3)
     assert d_hs < 1e-3 and d_mss < 1e-3
+
+
+# ---------------------------------------------------------------------------
+# Deriving tile sizes from lambda_p
+# ---------------------------------------------------------------------------
+
+
+def test_derived_sizes_put_the_first_edge_on_target_at_every_sea_state(record):
+    """The point of the derivation: `first_edge / k_p` stops depending on the sea.
+
+    With sizes fixed, the first band edge is pinned in absolute rad/m by the
+    tile geometry while `k_p` slides underneath it -- 2.1 k_p on the test lake
+    and 10.3 k_p on `straits`, from the same tile block. Scaling `L` with
+    `lambda_p` at fixed `n` cancels the sea-state term out of the ratio
+    entirely, so it should hold still to floating-point across the whole
+    usable range rather than merely staying inside a tolerance band.
+    """
+    from pywave.config import TileConfig
+
+    pinned = (23.0, 256)
+    lambdas = [1.05, 1.5, 1.705, 3.0, 5.0, 8.48, 13.59, 20.0, 35.3, 50.0,
+               75.0, 90.0]
+    edges = []
+    for lam in lambdas:
+        sizes = tiling.derive_tile_sizes(lam, (512, 256), (0.35, 0.7),
+                                         pinned=[pinned])
+        tiles = (TileConfig(size=sizes[0], n=512, band=(0.0, 0.35)),
+                 TileConfig(size=sizes[1], n=256, band=(0.35, 0.7)),
+                 TileConfig(size=pinned[0], n=pinned[1], band=(0.7, 1.0)))
+        # band_edges is the validator: it raises if any band fails to fit the
+        # tile carrying it, so reaching this line is itself part of the check.
+        edges.append(tiling.band_edges(tiles)[0][1] / (2.0 * np.pi / lam))
+
+    spread = max(edges) - min(edges)
+    record("2", "spread in first band edge over a 86x range of lambda_p", spread,
+           reference=0.0, tol=1e-6, unit="k_p",
+           note=f"lambda_p {min(lambdas)}-{max(lambdas)} m, all derived sizes "
+                f"land the first edge at {np.mean(edges):.6f} k_p. Held fixed "
+                f"instead, the same tiles give 2.1 k_p on the test lake and "
+                f"10.3 k_p on straits.",
+           passed=spread < 1e-6)
+    assert spread < 1e-6
+    assert all(abs(e - 2.0) < 1e-9 for e in edges)
+
+
+def test_derivation_refuses_a_pinned_tile_that_would_steal_k_ref():
+    """A pinned tile below the derived Nyquist is the silent failure again.
+
+    `band_edges` takes `k_ref` from the *minimum* Nyquist. Shrink the sea far
+    enough and the derived tiles overtake the pinned one, which then becomes
+    `k_ref` and puts the first edge wherever it likes -- measured at 0.97 k_p
+    for a 0.5 m sea against a 23 m top tile, with every other number still
+    correct. Nothing downstream raises, so this has to.
+    """
+    ok = tiling.derive_tile_sizes(1.5, (512, 256), (0.35, 0.7),
+                                  pinned=[(23.0, 256)])
+    assert ok[0] > 0
+
+    with pytest.raises(ValueError, match="would silently become k_ref"):
+        tiling.derive_tile_sizes(0.5, (512, 256), (0.35, 0.7),
+                                 pinned=[(23.0, 256)])
+
+    # Without `pinned` there is nothing to check against, so it stays silent --
+    # which is exactly why the config path always passes it.
+    tiling.derive_tile_sizes(0.5, (512, 256), (0.35, 0.7))
+
+
+def test_derivation_leaves_the_top_tile_alone(record):
+    """`k_max` must not move with the sea state. See TileSizing and 3a.
+
+    Deriving the top tile as well fixes the bands and wrecks the resolved
+    slope variance: it is the tile whose Nyquist *is* `k_max`, so growing it at
+    fixed `n` drags the mesh/BSDF handoff down with the sea.
+    """
+    sizes_small = tiling.derive_tile_sizes(2.0, (512, 256), (0.35, 0.7),
+                                           pinned=[(23.0, 256)])
+    sizes_big = tiling.derive_tile_sizes(40.0, (512, 256), (0.35, 0.7),
+                                         pinned=[(23.0, 256)])
+    assert len(sizes_small) == 2 and len(sizes_big) == 2
+    # A 20x change in sea state scales every derived tile by 20x exactly...
+    for a, b in zip(sizes_small, sizes_big):
+        assert b / a == pytest.approx(20.0, rel=1e-12)
+    # ...and the top tile, not being returned, cannot have moved at all.
+    record("2", "derived tiles returned per 3-tile set", len(sizes_small),
+           reference=2, tol=0, unit="",
+           note="The top tile sets k_max, which is a rendering decision. "
+                "Deriving all three on straits dropped k_max 35.0 -> 9.1 rad/m "
+                "and 36% of the resolved mss; leaving it pinned moved mss by "
+                "1.6e-03.",
+           passed=len(sizes_small) == 2)
+
+
+def test_derived_sizes_do_not_share_a_short_joint_period(record):
+    """Derived sizes must not come out in a low-order rational ratio.
+
+    Rotations are the real defence -- a single world translation cannot be a
+    lattice vector of two lattices separated by an irrational angle, and the
+    golden angle guarantees that. Sizes are the second line, and this pins it
+    so a future default cannot quietly make the ratio 2 or 3.
+    """
+    from fractions import Fraction
+
+    sizes = tiling.derive_tile_sizes(1.705, (512, 256), (0.35, 0.7),
+                                     pinned=[(23.0, 256)])
+    ratio = Fraction(sizes[0] / sizes[1]).limit_denominator(1000)
+    period = ratio.denominator          # in units of the larger tile
+
+    record("2", "joint period of the derived tile pair", period,
+           tol=100, unit="x L0",
+           note=f"L0/L1 = {sizes[0] / sizes[1]:.4f} = {ratio}, so the pair "
+                f"shares a period only after {period} of the larger tile. The "
+                f"hand-tuned configs sit at 719x (coastal_bay) and 37x "
+                f"(test_lake). Golden-angle rotations remove even this.",
+           passed=period >= 100)
+    assert period >= 100
+
+
+def _lake_with_tiles(tmp_path, tiles_block, speed=None):
+    """The shipped test lake with its `tiles:` block swapped out."""
+    src = (REPO_ROOT / "configs" / "test_lake.yaml").read_text(encoding="utf-8")
+    old = ("    - {size: 64.0, n: 512, band: [0.0, 0.35]}\n"
+           "    - {size: 37.0, n: 256, band: [0.35, 0.7]}\n"
+           "    - {size: 23.0, n: 256, band: [0.7, 1.0]}")
+    assert old in src, "test_lake.yaml tiles block moved; update this helper"
+    txt = src.replace(old, tiles_block)
+    if speed is not None:
+        txt = txt.replace("speed: 5.0", f"speed: {speed}")
+    p = tmp_path / "probe.yaml"
+    p.write_text(txt, encoding="utf-8")
+    return p
+
+
+AUTO_TILES = ("    - {size: auto, n: 512, band: [0.0, 0.35]}\n"
+              "    - {size: auto, n: 256, band: [0.35, 0.7]}\n"
+              "    - {size: 23.0, n: 256, band: [0.7, 1.0]}")
+
+
+def test_auto_sized_config_holds_its_band_split_across_a_sweep(record, tmp_path):
+    """What a sweep needs: change the sea, keep the band structure.
+
+    This is the whole point of the feature. The same config file, run at three
+    wind speeds, must put its first band edge in the same place relative to the
+    peak -- and must not move `k_max`, because that is a rendering decision and
+    the mesh was built for it.
+    """
+    from pywave import load_config
+
+    rows, edges, k_maxes = [], [], []
+    for speed in (5.0, 9.0, 14.0):
+        cfg = load_config(_lake_with_tiles(tmp_path, AUTO_TILES, speed=speed))
+        ts = tiling.TileSet.build(cfg)
+        s = ts.sizing()
+        edges.append(s.first_edge_over_k_p)
+        k_maxes.append(ts.k_max)
+        rows.append(f"U10 {speed:g} m/s -> lambda_p {cfg.lambda_p:.2f} m, "
+                    f"L0 {cfg.surface.tiles[0].size:.0f} m")
+        assert not s.notes, f"U10 {speed}: {' '.join(s.notes)}"
+
+    spread = max(edges) - min(edges)
+    record("2", "first-edge spread across an auto-sized sweep", spread,
+           reference=0.0, tol=1e-9, unit="k_p",
+           note=f"{'; '.join(rows)}. The tiles scale with the sea; the band "
+                f"split and k_max ({k_maxes[0]:.2f} rad/m) do not move.",
+           passed=spread < 1e-9)
+    assert spread < 1e-9
+    assert len(set(k_maxes)) == 1, "k_max moved with the sea state"
+
+
+def test_explicit_tile_sizes_are_left_exactly_as_written(tmp_path):
+    """A config that pins every size must be untouched by the auto machinery.
+
+    This is what keeps every existing scene reproducible: the derivation is
+    opt-in per tile, and a config with no `auto` never reaches it.
+    """
+    from pywave import load_config
+
+    for name in ("test_lake", "coastal_bay", "straits", "straits_crop"):
+        cfg = load_config(REPO_ROOT / "configs" / f"{name}.yaml")
+        raw = yaml.safe_load(
+            (REPO_ROOT / "configs" / f"{name}.yaml").read_text(encoding="utf-8"))
+        written = [float(t["size"]) for t in raw["surface"]["tiles"]]
+        assert [t.size for t in cfg.surface.tiles] == written, name
+
+
+def test_auto_tiles_are_rejected_where_they_cannot_be_derived(tmp_path):
+    """The two arrangements the derivation cannot express, refused by name."""
+    from pywave import load_config
+
+    all_auto = AUTO_TILES.replace(
+        "{size: 23.0, n: 256, band: [0.7, 1.0]}",
+        "{size: auto, n: 256, band: [0.7, 1.0]}")
+    with pytest.raises(ValueError, match="highest-band tile cannot be"):
+        load_config(_lake_with_tiles(tmp_path, all_auto))
+
+    auto_above_pinned = ("    - {size: 64.0, n: 512, band: [0.0, 0.35]}\n"
+                         "    - {size: auto, n: 256, band: [0.35, 0.7]}\n"
+                         "    - {size: 23.0, n: 256, band: [0.7, 1.0]}")
+    with pytest.raises(ValueError, match="must be the lowest bands"):
+        load_config(_lake_with_tiles(tmp_path, auto_above_pinned))

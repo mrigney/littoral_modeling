@@ -25,8 +25,10 @@ from .constants import G, JONSWAP_GAMMA
 from .surface import SurfaceField, WaveTile
 
 __all__ = [
+    "GOLDEN_RATIO",
     "GOLDEN_ANGLE",
     "band_edges",
+    "derive_tile_sizes",
     "tile_rotations",
     "sample_bilinear_periodic",
     "sample_periodic",
@@ -49,6 +51,175 @@ depend on the seed through two independent paths.
 def tile_rotations(n_tiles: int) -> tuple[float, ...]:
     """Deterministic per-tile grid rotations [rad], CCW."""
     return tuple(float((i * GOLDEN_ANGLE) % (2.0 * np.pi)) for i in range(n_tiles))
+
+
+#: Minimum ratio of any derived tile's Nyquist to the first tile's.  The first
+#: tile has to remain the most restrictive, because :func:`band_edges` takes
+#: ``k_ref`` from the minimum and the whole derivation is built on the first
+#: tile setting it.  Without this floor a narrow second band (``band_top`` below
+#: ``1/headroom``) would quietly take over as ``k_ref`` and the first edge would
+#: land nowhere near the target.
+_MIN_BIND = 1.05
+
+GOLDEN_RATIO = 0.5 * (1.0 + np.sqrt(5.0))
+"""~1.618.  The default Nyquist headroom for derived tiles, chosen irrational
+for the same reason :data:`GOLDEN_ANGLE` is: it is what keeps the derived sizes
+from sharing a finite joint period.
+
+A rational headroom gives a rational size ratio.  At the obvious ``1.5`` the
+first two tiles come out at exactly ``21/10``, so they realign every ten of the
+larger tile -- 764 m on the test lake, which is inside its 1000 m domain.  An
+irrational ratio never realigns at all.
+
+It also happens to land closer to the hand-tuned configs (19.8 lambda_p for the
+second tile against their 19.9 and 20.4) than 1.5 does (21.3)."""
+
+
+def derive_tile_sizes(lambda_p, n, band_tops, *, pinned=(),
+                      target_edge_over_k_p=2.0,
+                      headroom=GOLDEN_RATIO) -> tuple[float, ...]:
+    """Tile sizes [m] for the leading tiles of a set, derived from ``lambda_p``.
+
+    Sizes are not a scene-independent constant -- see :class:`TileSizing` for
+    what goes wrong when they are copied between scenes.  This is the rule that
+    replaces the copying.
+
+    Why the first tile is solved exactly
+    ------------------------------------
+    ``band_edges`` places the first interior edge at ``f0 * k_ref``, and
+    ``k_ref`` is the smallest Nyquist in the set -- the first tile's.  Writing
+    ``L0 = c0 * lambda_p`` and substituting ``k_p = 2*pi/lambda_p``:
+
+        k_ref      = pi*n0/L0 = n0*k_p / (2*c0)
+        first edge = f0*k_ref = f0*n0*k_p / (2*c0)
+
+    so ``c0 = f0*n0 / (2*target)`` puts the edge exactly ``target`` peak
+    wavenumbers up, for **any** sea state.  At ``f0 = 0.35``, ``n0 = 512`` and
+    ``target = 2`` that is 44.8, which is what ``coastal_bay`` and
+    ``straits_crop`` were hand-tuned to (44.84 and 44.67).  The constant is not
+    magic; it is what "put the first edge at 2 k_p" evaluates to.
+
+    The consequence worth stating: ``first_edge / k_p`` now contains no
+    sea-state term at all, so it holds still across a sweep instead of sliding
+    with ``k_p`` under a pinned edge.
+
+    Why the rest are not
+    --------------------
+    Only the first tile sets the edges.  The others merely have to *carry* their
+    band, so each is sized to put its Nyquist ``headroom x`` above its own band
+    top, floored by :data:`_MIN_BIND` so the first tile keeps setting ``k_ref``.
+    ``band_edges`` then validates the result and raises if any band still does
+    not fit; this function proposes, it does not re-check.
+
+    What is deliberately absent
+    ---------------------------
+    **The last tile.**  It sets ``k_max`` -- the top of the resolved range, and
+    therefore where the mesh/BSDF handoff lands -- which is a rendering
+    decision, not a property of the sea.  Scaling it with ``lambda_p`` at fixed
+    ``n`` coarsens its grid: measured on ``straits``, deriving all three tiles
+    dropped ``k_max`` from 35.0 to 9.1 rad/m and destroyed 36% of the resolved
+    slope variance, against 0.2% when the top tile was left alone.  So this
+    returns ``len(n)`` sizes and expects the caller to hold the top tile itself.
+
+    When the pinned tile does not fit
+    ---------------------------------
+    A tile held fixed while the derived ones scale will eventually stop being
+    compatible with them, at both ends:
+
+    * **Small seas.**  The derived tiles shrink until tile 0's Nyquist rises
+      *past* the pinned tile's.  ``k_ref`` then comes from the pinned tile
+      instead, and the first edge lands wherever that puts it -- silently.  With
+      a 23 m / 256 top tile the crossover is ``lambda_p ~ 1.03 m``; below it,
+      measured, the edge slid to 0.97 k_p while every other number stayed right.
+    * **Large seas.**  ``k_ref`` falls until the pinned tile's ``k_min`` no
+      longer reaches down to its own band.  ``band_edges`` raises for this one;
+      the crossover is ``lambda_p ~ 92 m``.
+
+    Between those bounds the derivation is exact.  That interval covers every
+    realistic littoral sea, and outside it the answer is not a cleverer
+    derivation but a top tile chosen for the render you are actually doing.
+    Pass ``pinned`` and the first failure becomes an exception instead of a
+    quietly wrong band split.
+
+    Parameters
+    ----------
+    lambda_p:
+        Peak wavelength of the scene's sea [m].
+    n:
+        Samples per side for each tile being derived, leading order.
+    band_tops:
+        Upper band fraction of each of those tiles, same order and length.
+    pinned:
+        ``(size, n)`` for each tile *not* being derived -- in practice the top
+        one.  Optional, but supplying it is strongly preferred: it is the only
+        way this function can tell that a pinned tile has undercut the derived
+        ones.  See "When the pinned tile does not fit" below.
+    target_edge_over_k_p:
+        Where to put the first interior edge, in units of ``k_p``.  1.5-3 keeps
+        the bands carrying meaningfully different physics; the shipped configs
+        sit at 2.
+    headroom:
+        How far above its own band top to put each subsequent tile's Nyquist.
+        Defaults to :data:`GOLDEN_RATIO`; keep it irrational unless you have a
+        reason not to, or the derived sizes acquire a finite joint period.
+
+    Raises
+    ------
+    ValueError
+        On a non-positive ``lambda_p``, mismatched lengths, or a
+        ``target_edge_over_k_p`` that is not positive and finite.
+    """
+    n = tuple(int(v) for v in n)
+    band_tops = tuple(float(v) for v in band_tops)
+    if len(n) != len(band_tops):
+        raise ValueError(
+            f"n and band_tops must be the same length, got {len(n)} and "
+            f"{len(band_tops)}")
+    if not n:
+        raise ValueError("nothing to derive: n is empty")
+    if not np.isfinite(lambda_p) or lambda_p <= 0.0:
+        raise ValueError(f"lambda_p must be positive and finite, got {lambda_p}")
+    if not np.isfinite(target_edge_over_k_p) or target_edge_over_k_p <= 0.0:
+        raise ValueError(
+            f"target_edge_over_k_p must be positive and finite, got "
+            f"{target_edge_over_k_p}")
+    if headroom <= 1.0:
+        raise ValueError(f"headroom must exceed 1, got {headroom}")
+    if any(v <= 0 for v in n):
+        raise ValueError(f"every n must be positive, got {n}")
+    if any(not 0.0 < f <= 1.0 for f in band_tops):
+        raise ValueError(f"every band top must lie in (0, 1], got {band_tops}")
+
+    c0 = band_tops[0] * n[0] / (2.0 * target_edge_over_k_p)
+    sizes = [c0 * lambda_p]
+    for n_i, top_i in zip(n[1:], band_tops[1:]):
+        # Nyquist ratio to tile 0; >= _MIN_BIND keeps tile 0 the minimum.
+        ratio = max(headroom * top_i, _MIN_BIND)
+        sizes.append(c0 * (n_i / n[0]) / ratio * lambda_p)
+    sizes = [float(s) for s in sizes]
+
+    # The derivation is only correct while tile 0 is the most restrictive tile
+    # in the *whole* set, pinned tiles included -- that is what makes `k_ref`
+    # tile 0's Nyquist and the first edge land on target. A pinned tile that
+    # undercuts it does not raise anywhere downstream; it just takes over
+    # `k_ref` and moves the edge.
+    k_nyq_0 = np.pi * n[0] / sizes[0]
+    for size_p, n_p in pinned:
+        k_nyq_p = np.pi * int(n_p) / float(size_p)
+        if k_nyq_p < k_nyq_0:
+            # k_nyq_0 = pi*n0/(c0*lambda_p), so it drops below the pinned tile's
+            # Nyquist once lambda_p >= pi*n0/(c0*k_nyq_p).
+            lam_min = np.pi * n[0] / (c0 * k_nyq_p)
+            raise ValueError(
+                f"pinned tile size={size_p} n={n_p} has Nyquist "
+                f"{k_nyq_p:.3f} rad/m, below the derived first tile's "
+                f"{k_nyq_0:.3f} rad/m. It would silently become k_ref and put "
+                f"the first band edge somewhere other than "
+                f"{target_edge_over_k_p} k_p. This sea (lambda_p "
+                f"{lambda_p:.2f} m) is too small for that top tile, which needs "
+                f"lambda_p above {lam_min:.2f} m -- raise the pinned tile's n "
+                f"or shrink it.")
+    return tuple(sizes)
 
 
 def band_edges(tiles) -> tuple[tuple[float, float], ...]:
