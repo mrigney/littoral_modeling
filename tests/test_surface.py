@@ -559,12 +559,19 @@ def test_resizing_tiles_redistributes_energy_without_changing_it(record):
     cfg = load_config(REPO_ROOT / "configs" / "straits_crop.yaml")
     good = tiling.TileSet.build(cfg)
 
-    # The old, badly sized set: the test lake's tiles on a 13.6 m sea.
+    # The old, badly sized set: the test lake's tiles on a 13.6 m sea. Building
+    # it warns, correctly, and that warning is suppressed here rather than left
+    # to scroll past -- a suite that routinely prints TileSizingWarning teaches
+    # the reader to ignore the one that means something.
+    import warnings
+
     stale = tuple(dataclasses.replace(t, size=s, n=n) for t, (s, n) in
                   zip(cfg.surface.tiles, ((64.0, 512), (37.0, 256), (23.0, 256))))
-    bad = tiling.TileSet.build(
-        dataclasses.replace(cfg, surface=dataclasses.replace(cfg.surface,
-                                                             tiles=stale)))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", tiling.TileSizingWarning)
+        bad = tiling.TileSet.build(
+            dataclasses.replace(cfg, surface=dataclasses.replace(cfg.surface,
+                                                                 tiles=stale)))
 
     d_hs = abs(good.hs() / bad.hs() - 1)
     d_mss = abs(good.mss() / bad.mss() - 1)
