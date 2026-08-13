@@ -112,6 +112,10 @@ def scene_summary(scene) -> dict:
     runup = float(nearshore.hunt_runup(xi, ts.hs()))
 
     mesh_dx = cfg.output.mesh_dx
+    # The finest spacing that will ever sample this surface -- the base mesh or
+    # the tightest LOD ring, whichever is smaller. That, not `mesh_dx`, is what
+    # `k_max` has to clear.
+    finest_dx = min([mesh_dx] + [r.dx for r in cfg.output.lod_rings])
     return {
         "scene": {
             "name": cfg.name,
@@ -156,11 +160,18 @@ def scene_summary(scene) -> dict:
                  "rotation_deg": float(np.degrees(t.rotation))}
                 for t in ts.tiles
             ],
+            # The whole TileSizing record, not a summary of it. A sweep is only
+            # auditable after the fact if each run wrote down what it actually
+            # used -- reconstructing it later means rebuilding the tile set from
+            # a config that may since have changed.
             "sizing": {
                 "lambda_p_m": sizing.lambda_p,
+                "k_p_rad_m": sizing.k_p,
                 "first_edge_over_k_p": sizing.first_edge_over_k_p,
                 "band_shares": list(sizing.band_shares),
+                "largest_tile_m": sizing.largest_tile_m,
                 "largest_tile_over_lambda_p": sizing.largest_tile_over_lambda_p,
+                "domain_m": sizing.domain_m,
                 "bands_are_inert": sizing.bands_are_inert,
                 "notes": list(sizing.notes),
             },
@@ -180,6 +191,14 @@ def scene_summary(scene) -> dict:
             "beckmann_alpha_at_mesh": float(np.sqrt(moments.mss_above(
                 np.pi / mesh_dx, u10, fetch, gamma=gamma))),
             "rings": [{"r_m": r.r, "dx_m": r.dx} for r in cfg.output.lod_rings],
+            # Headroom between what the surface carries and what the finest
+            # consumer can resolve. Below 1.0 the band in between is in neither
+            # the geometry nor the BSDF: no tile synthesised it, and
+            # `submesh_mss` told the BSDF the mesh had it covered. Recorded
+            # rather than merely asserted in the suite, because a sweep can
+            # change `mesh_dx` per run from the command line.
+            "finest_dx_m": finest_dx,
+            "k_max_over_finest_nyquist": float(ts.k_max / (np.pi / finest_dx)),
         },
         "bathymetry": beach.summary(),
         "nearshore": {
