@@ -1,6 +1,17 @@
 # Tile auto-sizing — deriving tile sizes from λ_p
 
-**Status: planned. Nothing here is built.** Target v0.2.0.
+**Status: built.** Shipped on `dev` for v0.2.0; see §6 for what each step
+turned into. User-facing documentation is in
+[users_guide.md](users_guide.md) §5.
+
+Three things changed as this was built, each because a measurement contradicted
+the plan. They are marked **[revised]** where they appear:
+
+1. The top tile must be **pinned**, not derived — it sets `k_max` (§3a).
+2. Band fractions did **not** need re-expressing in units of k_p; deriving the
+   sizes is sufficient (§3).
+3. `mesh_dx` belongs as a **constraint**, not as a derivation input — and the
+   constraint was already violated by `coastal_bay` (§7, step 1b).
 
 Tile sizes are currently hand-written per scene. They are a function of the sea
 state, they are copied between configs, and when they are wrong every gate still
@@ -358,9 +369,41 @@ error under a `--strict` flag on `run_scene.py`.
 
 ### Step 6 — sweep ergonomics
 
-Only after 1–5. Whatever the sweep driver needs to vary sea state without
-touching tiles at all — most likely just documenting that sweep configs should
-omit `tiles:`.
+Documented in [users_guide.md](users_guide.md) §5: sweep configs write
+`size: auto` on the lower-band tiles and a number on the top one, then run with
+`--strict`.
+
+**[revised]** The plan guessed sweep configs would *omit* `tiles:` entirely.
+Per-tile `auto` turned out better: it keeps `n` and the band fractions where
+they already live, needs no parallel config block, and makes §3a visible in the
+file — the top tile has a number precisely because it is a rendering decision.
+
+---
+
+## 8. What was built
+
+| step | outcome |
+|---|---|
+| 1 | configs discovered by glob; `straits.yaml` resized to 380/172/23 |
+| 1b | `k_max >= π/finest dx` asserted per config; `coastal_bay` top tile 367 → 128 m |
+| 2 | full `TileSizing` + mesh headroom in `summary.json`; Tile sizing table in `collect_run_info` |
+| 3 | `derive_tile_sizes()`, exact to <1e-9 k_p over λ_p 1.05–90 m |
+| 4 | `size: auto` per tile, resolved in `load_config` |
+| 5 | `TileSizingWarning` at build; `run_scene.py --strict` exits 2 |
+| 6 | users guide §5 |
+
+Two findings that only appeared once the code existed:
+
+**A pinned tile can steal `k_ref`.** Below λ_p ≈ 1.03 m against a 23 m top tile,
+the derived tiles overtake it, the pinned tile becomes the minimum Nyquist, and
+the first edge slid to 0.97 k_p — with every other number still correct. Passing
+`pinned` now makes that an exception carrying the minimum workable λ_p.
+
+**The obvious headroom constant reintroduces a period.** At `headroom = 1.5` the
+first two derived tiles come out at exactly 21/10, realigning every ten of the
+larger tile — 764 m on the test lake, inside its 1000 m domain. The default is
+the golden ratio instead: irrational, never realigns, and lands nearer the
+hand-tuned configs (19.8 λ_p vs their 19.9 and 20.4) than 1.5 did (21.3).
 
 ---
 
