@@ -776,3 +776,58 @@ def test_auto_tiles_are_rejected_where_they_cannot_be_derived(tmp_path):
                          "    - {size: 23.0, n: 256, band: [0.7, 1.0]}")
     with pytest.raises(ValueError, match="must be the lowest bands"):
         load_config(_lake_with_tiles(tmp_path, auto_above_pinned))
+
+
+def test_a_mis_sized_tile_set_warns_when_it_is_built(record):
+    """A bad tile set has to announce itself; nothing else will.
+
+    Every other check passes on a mis-sized set -- `Hs` is right, the bands
+    sum, the LOD invariant closes -- so the note in `TileSizing` was the only
+    signal, and it only existed if somebody thought to look. Emitting it as a
+    warning at build time is what puts it in front of the person running a
+    sweep.
+
+    Its own category, so `--strict` can escalate this and only this.
+    """
+    import dataclasses
+    import warnings
+
+    from pywave import load_config
+
+    cfg = load_config(REPO_ROOT / "configs" / "straits.yaml")
+
+    with warnings.catch_warnings(record=True) as clean:
+        warnings.simplefilter("always")
+        good = tiling.TileSet.build(cfg)
+    assert [w for w in clean if issubclass(w.category, tiling.TileSizingWarning)] == []
+
+    stale = tuple(dataclasses.replace(t, size=s, n=n) for t, (s, n) in
+                  zip(cfg.surface.tiles, ((64.0, 512), (37.0, 256), (23.0, 256))))
+    bad_cfg = dataclasses.replace(
+        cfg, surface=dataclasses.replace(cfg.surface, tiles=stale))
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        tiling.TileSet.build(bad_cfg)
+    fired = [w for w in caught if issubclass(w.category, tiling.TileSizingWarning)]
+
+    # A truncated set drops its top bands on purpose, so its shares are lopsided
+    # by construction. Warning there would teach the reader to ignore this.
+    with warnings.catch_warnings(record=True) as truncated:
+        warnings.simplefilter("always")
+        good.band_limited(good.k_max * 0.4)
+    assert [w for w in truncated
+            if issubclass(w.category, tiling.TileSizingWarning)] == []
+
+    record("2", "warnings raised by a mis-sized tile set", len(fired),
+           tol=1, unit="",
+           note=f"straits carrying the test lake's 64/37/23 m tiles warns "
+                f"{len(fired)}x at build; the sized set and a band-limited "
+                f"truncation of it warn not at all. "
+                f"`run_scene.py --strict` turns these into exit code 2.",
+           passed=len(fired) >= 1)
+    assert len(fired) >= 1
+    with pytest.raises(tiling.TileSizingWarning):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", tiling.TileSizingWarning)
+            tiling.TileSet.build(bad_cfg)

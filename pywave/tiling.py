@@ -16,6 +16,7 @@ validates that each band fits inside the tile that carries it.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 
 import numpy as np
@@ -25,6 +26,7 @@ from .constants import G, JONSWAP_GAMMA
 from .surface import SurfaceField, WaveTile
 
 __all__ = [
+    "TileSizingWarning",
     "GOLDEN_RATIO",
     "GOLDEN_ANGLE",
     "band_edges",
@@ -36,6 +38,17 @@ __all__ = [
     "TileSizing",
     "composite_surface",
 ]
+
+
+class TileSizingWarning(UserWarning):
+    """A tile set that is not sized for the sea it is carrying.
+
+    Its own category so a sweep can escalate exactly this to an error --
+    ``warnings.simplefilter("error", TileSizingWarning)`` -- without turning
+    every other warning in the process fatal.  ``scripts/run_scene.py --strict``
+    does precisely that.
+    """
+
 
 GOLDEN_ANGLE = np.pi * (3.0 - np.sqrt(5.0))
 """~137.5 deg.  Successive multiples are maximally non-repeating, which is what
@@ -471,7 +484,21 @@ class TileSet:
             # band starts at k = 0 and k_cut is positive.
             if band[1] > band[0]
         )
-        return cls(tiles, cfg=cfg, depth=depth)
+        built = cls(tiles, cfg=cfg, depth=depth)
+
+        # Say it out loud. A mis-sized set passes every other check -- Hs is
+        # right, the bands sum, the LOD invariant closes -- so the only thing
+        # standing between a quietly wrong band split and a whole sweep of
+        # renders is somebody noticing. Do not make them go looking.
+        #
+        # Skipped for truncated sets: `band_limited` deliberately drops the top
+        # bands, so its shares are lopsided by construction and warning about
+        # them would train the reader to ignore this.
+        if k_cut is None:
+            for note in built.sizing().notes:
+                warnings.warn(f"{cfg.name}: {' '.join(note.split())}",
+                              TileSizingWarning, stacklevel=2)
+        return built
 
     def band_limited(self, k_cut: float) -> "TileSet":
         """This same sea with everything above ``k_cut`` removed.
