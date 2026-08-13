@@ -46,3 +46,12 @@ houdini_export/
 # note above warns about. Name new exports `<something>_export/` and they are
 # covered automatically.
 straits/
+
+# Coverage data and rendered reports. `.coverage` is a SQLite database of line
+# hits keyed by absolute path, so it is machine-specific and worthless to anyone
+# else; `.coverage.*` are the per-process files a parallel run leaves behind.
+# The measured number belongs in the validation report, not in version control.
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml

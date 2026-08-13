@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.4", "matplotlib>=3.8", "pillow>=10.0"]
+dev = ["pytest>=7.4", "pytest-cov>=4.1", "matplotlib>=3.8", "pillow>=10.0"]
 # Bundles an ffmpeg binary so `scripts/animate.py` can write MP4 without a
 # system install. Optional: without it the script falls back to GIF, which
 # works but is several times larger for the same clip.
@@ -35,4 +35,29 @@ markers = [
     "gate6: Phase 6 gate checks (mesh generation and export)",
     "gate5b: Phase 5b gate checks (refraction on a complex coastline)",
     "slow: takes more than a couple of seconds",
+]
+
+# Coverage is deliberately NOT in `addopts` above. The full suite runs in about
+# 5 min 15 s with `--cov` on, and tracing every line is not free; paying it on
+# the single-test runs you do while debugging buys nothing. Ask for it instead:
+#     pytest --cov                  # terminal summary
+#     pytest --cov --cov-report=html   # then open htmlcov/index.html
+# The `source` setting below is what lets `--cov` work with no argument.
+[tool.coverage.run]
+source = ["pywave"]
+# Branch coverage is off on purpose. It is the stricter measure, but turning it
+# on redefines the denominator, so the number stops being comparable to the
+# 93.5% recorded at v0.1.0. Turn it on with a deliberate re-baseline, not by
+# accident.
+branch = false
+
+[tool.coverage.report]
+precision = 1
+exclude_also = [
+    # Import-guard fallbacks for the optional extras (matplotlib, pillow,
+    # imageio-ffmpeg). Unreachable when the dev extra is installed, which is
+    # exactly when coverage runs.
+    "except ImportError:",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
 ]
