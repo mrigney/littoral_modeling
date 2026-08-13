@@ -41,9 +41,20 @@ spectrum:
   seed: 20260801
 
 surface:
-  tiles:                        # incommensurate sizes, disjoint bands
-    - {size: 64.0, n: 512, band: [0.0, 0.35]}
-    - {size: 37.0, n: 256, band: [0.35, 0.7]}
+  # Incommensurate sizes, disjoint bands. Sized for THIS scene's sea
+  # (lambda_p 8.48 m at 8 m/s over 7 km), not copied from another config --
+  # see docs/tile_autosizing.md.
+  #
+  # Tiles 1 and 2 scale with lambda_p at 44.8x and 20.3x, which puts the first
+  # band edge at 2.0 k_p. The third tile does NOT scale: it sets k_max, which
+  # is a rendering decision (it must clear pi/0.25 = 12.6 rad/m, the finest
+  # LOD ring below), so it stays at 23 m for k_max = 35.0 rad/m.
+  #
+  # These were 64/37/23 -- the test lake's tiles on a sea five times larger,
+  # which put the first edge at 10.3 k_p and 99.3% of the variance in band 1.
+  tiles:
+    - {size: 380.0, n: 512, band: [0.0, 0.35]}
+    - {size: 172.0, n: 256, band: [0.35, 0.7]}
     - {size: 23.0, n: 256, band: [0.7, 1.0]}
   choppiness: 1.0
 

@@ -511,12 +511,22 @@ def test_every_shipped_scene_has_tiles_sized_for_its_own_sea(record):
     Measured before this was checked: `straits_crop` inherited the test lake's
     64/37/23 m tiles against a peak wavelength eight times longer, putting its
     first edge at 16.4 k_p and 99.7% of the variance in one band.
+
+    Configs are **discovered, not listed**. An earlier version of this test
+    iterated a hardcoded triple, which is how `straits.yaml` kept the same
+    inherited 64/37/23 m tiles -- at 10.3 k_p, 99.3% in band 1 -- for as long
+    as it did. A test named "every shipped scene" that enumerates three of four
+    scenes will always drift back out of date the moment a config is added.
     """
     from pywave import load_config
 
+    configs = sorted((REPO_ROOT / "configs").glob("*.yaml"))
+    assert configs, "no configs discovered -- the glob is wrong, not the scenes"
+
     worst_name, worst_share, rows = "", 0.0, []
-    for name in ("test_lake", "coastal_bay", "straits_crop"):
-        cfg = load_config(REPO_ROOT / "configs" / f"{name}.yaml")
+    for path in configs:
+        name = path.stem
+        cfg = load_config(path)
         s = tiling.TileSet.build(cfg).sizing()
         rows.append(f"{name} {s.first_edge_over_k_p:.1f} k_p "
                     f"({s.band_shares[0]:.1%} in band 1)")
