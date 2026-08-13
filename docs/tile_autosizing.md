@@ -25,9 +25,8 @@ config.
 
 **Not a re-baseline.** See §5 — the evidence says the numbers do not move.
 
-**Not a fix for run-to-run pattern correlation.** A sweep with a fixed seed
-produces correlated wave patterns across sea states. That is a separate knob and
-arguably a feature; §7 records it as an open question rather than solving it.
+**Not a seed policy.** The seed comes from the external script driving the
+sweep. See §7.
 
 ---
 
@@ -256,12 +255,45 @@ Make `test_every_shipped_scene_has_tiles_sized_for_its_own_sea` discover
 `configs/*.yaml` by glob instead of a hardcoded triple. It will immediately fail
 on `straits`, which is correct — that is the bug it was written to catch.
 
-Then fix `straits.yaml` by hand to **`{380, 172, 23} @ 512/256/256`** — tiles 1
-and 2 at 44.8/20.4 × 8.48 m, third tile left at 23 m per §3a. Verified: first
-edge 2.00 k_p, shares [0.83, 0.13, 0.05], no notes, `k_max` unchanged at 34.97,
-`Hs` shift 9.4e-04.
+Then **delete `straits.yaml`.** It is an unmaintained predecessor to
+`straits_crop.yaml`, which is why it is the only config left mis-sized and the
+only one the test omits. Resizing a dead config is work spent to keep something
+alive that nothing uses.
 
-*Gate: the suite is green and the assertion now covers four configs, not three.*
+*Gate: the suite is green and the assertion covers every config in `configs/`,
+discovered rather than listed.*
+
+### Step 1b — assert `k_max` clears the finest mesh *(independent, do with 1)*
+
+`submesh_mss` hands the BSDF `mss_above(π/dx)`, which assumes the mesh resolved
+everything below its own Nyquist. When `k_max < π/dx` that assumption is false
+and the band between them is in **neither** the geometry nor the BSDF.
+
+`coastal_bay` is in that state today:
+
+| | value |
+|---|---|
+| surface `k_max` | 4.383 rad/m (λ 1.43 m) |
+| mesh Nyquist, π/0.5 | 6.283 rad/m (λ 1.00 m) |
+| mss in neither | **4.77% of total** |
+| Beckmann α | 0.1664 reported vs 0.1735 correct (−4.2%) |
+| LOD closure | 1.4e-04 at `k_max`, **4.8e-02** at π/dx |
+
+Add the constraint, checked per config:
+
+```
+k_max  >=  pi / min(output.mesh_dx, every lod_rings[].dx)
+```
+
+`band_limited(k_cut)` already covers the opposite direction — surface finer than
+mesh — and does it correctly. Nothing covers this direction.
+
+Fix `coastal_bay` by moving its third tile 367 m → **128 m at n=512**, giving
+`k_max` 12.57 (2× the mesh Nyquist). Verified: gap eliminated, first edge still
+2.00 k_p, shares still [0.82, 0.13, 0.05]. Only `k_max` moves.
+
+*Gate: every shipped config satisfies the constraint, and a config that violates
+it fails the suite.*
 
 ### Step 2 — persist the sizing record
 
@@ -332,27 +364,35 @@ omit `tiles:`.
 
 ---
 
-## 7. Open questions
+## 7. Resolved questions
 
-**Should `straits.yaml` still exist?** `straits_crop.yaml` is the maintained
-one; `straits.yaml` looks like an unmaintained predecessor, which is consistent
-with it being the only config left mis-sized and the only one omitted from the
-test. If it is dead, deleting it is a better step 1 than resizing it.
+Kept rather than deleted, because the reasoning is the useful part.
 
-**Seed policy across a sweep.** Fixed seed + fixed tile geometry means the wave
-*pattern* is correlated run-to-run and only amplitudes change. For a controlled
-sweep that isolates the variable, which may be exactly right. For a set of
-independent-looking sea states it is wrong. This wants a decision, not a
-default — and note that auto-sizing changes the geometry per sea state, so it
-partially decorrelates the sweep as a side effect whether or not that was
-wanted.
+**Should `straits.yaml` still exist? — No.** Unmaintained predecessor to
+`straits_crop.yaml`. Deleted in step 1 rather than resized.
 
-**Does `mesh_dx` belong in the derivation?** §3a says `k_max` is a rendering
-decision, which raises the obvious follow-on: it is currently set indirectly, by
-choosing `L₃` and `n₃` by hand. `band_limited(k_cut)` already exists to cut the
-spectrum at a mesh's Nyquist. Whether the top tile should instead be derived
-*from* `output.mesh_dx` is a real design question, but it is a different change
-from this one and should not be bundled.
+**Seed policy across a sweep. — Out of scope.** The seed is set by the external
+script driving the sweep, which sometimes wants repeatable patterns and
+sometimes does not. That is a caller's decision and this package should not
+have an opinion. Note only that auto-sizing changes tile geometry per sea state,
+so two runs sharing a seed but not a sea state are *less* correlated than they
+are today — the caller should not assume a shared seed alone pins the pattern.
 
-*(An earlier open question here asked whether the third tile's size mattered.
-§3a answers it: it sets `k_max` and must be pinned. Resolved, not dropped.)*
+**Does `mesh_dx` belong in the derivation? — No, but it belongs as a
+constraint.** Three reasons not to derive `k_max` from it:
+
+1. *There is no single `mesh_dx`.* LOD rings carry their own spacings
+   (`test_lake` meshes at 0.125 / 0.5 / 2.0 m) and `run_scene.py` takes a
+   `--mesh-dx` override. There is no well-defined scalar to derive from.
+2. *`band_limited(k_cut)` already handles the coarse direction, correctly.* The
+   architecture is synthesize-once, cut-per-consumer. Deriving `k_max` from
+   `mesh_dx` inverts it and implies a separate surface per LOD ring.
+3. *It would couple synthesis to output.* A scene can be re-meshed today without
+   being re-synthesised. Worth keeping.
+
+What was genuinely missing is the **lower bound** — `k_max` must clear the
+finest consumer's Nyquist — and it is violated today. Promoted out of this
+section into step 1b, with measurements.
+
+**Whether the third tile's size mattered. — Yes.** §3a: it sets `k_max` and must
+not scale with λ_p.
