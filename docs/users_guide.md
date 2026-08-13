@@ -309,6 +309,48 @@ Rules 1 and 2 pull in opposite directions, so give them to different tiles:
 | tiles 1–2 | fix `k_ref`, hence where the bands split | `λp` |
 | tile 3 | fix the shortest wave drawn, hence the mesh/`mss` handoff | `output.mesh_dx` |
 
+#### Sizing the last tile: one rule
+
+The last tile's Nyquist **is** `k_max`, the shortest wave the surface carries.
+Its size and `n` matter only through their ratio — its own sample spacing,
+`dx₃ = size/n` — and that has to be at least as fine as the mesh that will
+sample it:
+
+> **`size/n` ≤ `mesh_dx`.**
+
+Equivalently `k_max ≥ π/mesh_dx`. The headroom you get is just the ratio:
+`k_max / mesh-Nyquist = mesh_dx / dx₃`.
+
+**Go coarser and slope variance vanishes.** `submesh_mss` hands the BSDF
+"everything below the mesh Nyquist", i.e. `mss_above(π/mesh_dx)`. If the surface
+stops before that, the band in between is in *neither* place — no tile
+synthesised it, and the BSDF was told the mesh had it. `coastal_bay` sat there
+until recently: `k_max` 4.38 against a mesh Nyquist of 6.28, losing 4.77% of the
+total slope variance and reading Beckmann α 4.2% low. **This is now checked**,
+per config, by the test suite — so you get told rather than shipping it.
+
+**Going much finer is not wrong, just wasted.** Anything above the mesh Nyquist
+is removed by `band_limited` before sampling (that is what stops it aliasing)
+and reaches the renderer as `mss` instead. So a top tile far finer than the mesh
+buys no geometry and still costs an FFT per frame.
+
+The shipped configs run between 1.4× and 2.8×. **2× — `size/n = mesh_dx/2` — is
+a sound default**, leaving margin without paying much for it:
+
+| config | top tile | `dx₃` | `mesh_dx` | headroom |
+|---|---|---|---|---|
+| `test_lake` | 23 / 256 | 0.090 | 0.125 | 1.4× |
+| `coastal_bay` | 128 / 512 | 0.250 | 0.500 | 2.0× |
+| `straits_crop` | 23 / 256 | 0.090 | 0.250 | 2.8× |
+
+Note this is the one tile `size: auto` will not touch, and this rule is why:
+`mesh_dx` is a decision about your render, not about the sea. If you later mesh
+the same scene much finer, this is the tile to revisit.
+
+*(When LOD rings are built, the rule takes the **finest** spacing any ring uses
+rather than `mesh_dx`. The check already reads them; in every shipped config the
+tightest ring equals `mesh_dx`, so nothing changes today.)*
+
 Resizing on that rule is a **redistribution, not a different sea**: on
 `straits_crop`, moving band 1 from 99.7% to 82.5% left `Hs`, `k_max` and resolved
 `mss` unchanged to four decimals. Safe to apply to a scene you have validated.
