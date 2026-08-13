@@ -4,12 +4,12 @@
 
 | | |
 |---|---|
-| generated | 2026-08-13 03:08:01 UTC |
-| git_sha | `bd1aaabca49181bf81a032b71a90a1d54d072558` |
+| generated | 2026-08-13 13:27:41 UTC |
+| git_sha | `249ec1a885835a6bb7449e3ea5f6b14bc9c2d52f` |
 | scene | `configs/test_lake.yaml` |
 | python | 3.14.5 (Windows AMD64) |
 | numpy / scipy | 2.5.1 / 1.18.0 |
-| checks recorded | 170 |
+| checks recorded | 176 |
 | exit status | PASS |
 
 Every number below was measured by the test suite against the implementation in this commit. Tolerances are the gate criteria from `littoral-water-implementation-cookbook.md`, except where a deviation is recorded in [Gate deviations](#gate-deviations).
@@ -94,6 +94,11 @@ Notes:
 | Hs loss, cubic sampling (order=3) | 0.013306 | 0 | -- | 3.0e-02 | PASS |
 | worst band-1 variance share across shipped scenes | 0.841024 | -- | -- | 9.5e-01 | PASS |
 | Hs shift from resizing tiles | 6.9820e-04 | 0 | -- | 1.0e-03 | PASS |
+| spread in first band edge over a 86x range of lambda_p | 8.8818e-16 k_p | 0 k_p | -- | 1.0e-06 | PASS |
+| derived tiles returned per 3-tile set | 2 | 2 | 0.00e+00 | 0.0e+00 | PASS |
+| joint period of the derived tile pair | 705 x L0 | -- | -- | 1.0e+02 | PASS |
+| first-edge spread across an auto-sized sweep | 2.2204e-16 k_p | 0 k_p | -- | 1.0e-09 | PASS |
+| warnings raised by a mis-sized tile set | 2 | -- | -- | 1.0e+00 | PASS |
 
 Notes:
 
@@ -113,8 +118,13 @@ Notes:
 - **crest phase speed** -- Single mode, k = 0.3927 rad/m, along +x. A sign error in the time evolution would give -4.9981 m/s.
 - **Tz from zero crossings** -- 256 probe points, 48 s at 24 Hz, 27005 crossings. Theory banded to k in [0.098, 12.57] rad/m. Against the untruncated Tz of 0.816 s the error would be 11.7%.
 - **Hs loss, cubic sampling (order=3)** -- Bilinear (order=1) loses 5.8% for comparison, and the standalone bilinear routine loses 2.3% of one tile's standard deviation. At the Nyquist, bilinear retains only 1/3 of the power.
-- **worst band-1 variance share across shipped scenes** -- test_lake 2.1 k_p (84.1% in band 1); coastal_bay 2.0 k_p (82.5% in band 1); straits_crop 2.0 k_p (82.5% in band 1). Above 0.95 the disjoint bands cost three FFTs a frame and buy nothing, because every frequency-dependent nearshore effect collapses to one representative frequency. Worst is test_lake.
+- **worst band-1 variance share across shipped scenes** -- coastal_bay 2.0 k_p (82.4% in band 1); houdini_lake 2.1 k_p (84.1% in band 1); straits 2.0 k_p (82.5% in band 1); straits_crop 2.0 k_p (82.5% in band 1); test_lake 2.1 k_p (84.1% in band 1). Above 0.95 the disjoint bands cost three FFTs a frame and buy nothing, because every frequency-dependent nearshore effect collapses to one representative frequency. Worst is houdini_lake.
 - **Hs shift from resizing tiles** -- band 1 share moves 99.7% -> 82.5% while Hs moves 6.98e-04 and resolved mss 1.44e-04, with k_max identical. A resize is a redistribution, not a different sea.
+- **spread in first band edge over a 86x range of lambda_p** -- lambda_p 1.05-90.0 m, all derived sizes land the first edge at 2.000000 k_p. Held fixed instead, the same tiles give 2.1 k_p on the test lake and 10.3 k_p on straits.
+- **derived tiles returned per 3-tile set** -- The top tile sets k_max, which is a rendering decision. Deriving all three on straits dropped k_max 35.0 -> 9.1 rad/m and 36% of the resolved mss; leaving it pinned moved mss by 1.6e-03.
+- **joint period of the derived tile pair** -- L0/L1 = 2.2652 = 1597/705, so the pair shares a period only after 705 of the larger tile. The hand-tuned configs sit at 719x (coastal_bay) and 37x (test_lake). Golden-angle rotations remove even this.
+- **first-edge spread across an auto-sized sweep** -- U10 5 m/s -> lambda_p 1.71 m, L0 76 m; U10 9 m/s -> lambda_p 2.54 m, L0 114 m; U10 14 m/s -> lambda_p 3.43 m, L0 154 m. The tiles scale with the sea; the band split and k_max (34.97 rad/m) do not move.
+- **warnings raised by a mis-sized tile set** -- straits carrying the test lake's 64/37/23 m tiles warns 2x at build; the sized set and a band-limited truncation of it warn not at all. `run_scene.py --strict` turns these into exit code 2.
 
 ## Gate 3 -- reproducibility and regression
 
@@ -237,7 +247,7 @@ Notes:
 - **cold vs sequential, worst per-cell relative error** -- Spin-up 92 steps = 23.0 s, initial-condition residual 0.0049. As a fraction of peak coverage the error is 0.121%. The cookbook's suggested 30 frames would leave 79% of the initial condition intact -- the window is set by the half life, not by a frame count.
 - **spin-up steps for 0.5% residual at 30 fps** -- = 22.9 s of simulated time. At the 0.25 s foam step the same window is 92 steps, which is why foam does not sub-step at the frame rate.
 - **depth from the coarse vs refined grid, 5 m offshore** -- Grids are 1 m and 0.25 m; they describe one beach, so a sample must not depend on which is used.
-- **shipped configs that load and build** -- coastal_bay: Hs 1.432 m, Tp 4.75 s; houdini_lake: Hs 0.085 m, Tp 1.05 s; straits: Hs 0.382 m, Tp 2.33 s; straits_crop: Hs 0.712 m, Tp 2.95 s; test_lake: Hs 0.085 m, Tp 1.05 s.
+- **shipped configs that load and build** -- coastal_bay: Hs 1.433 m, Tp 4.75 s; houdini_lake: Hs 0.085 m, Tp 1.05 s; straits: Hs 0.381 m, Tp 2.33 s; straits_crop: Hs 0.712 m, Tp 2.95 s; test_lake: Hs 0.085 m, Tp 1.05 s.
 - **cropped vs parent bathymetry, worst sampling difference** -- Parent (200, 4000), crop (81, 1001). The crop carries its own origin, so world coordinates are unchanged.
 - **foam equilibrium across half lives 1-30 s (worst deviation)** -- Target 0.85. 1s: 0.850, 3s: 0.850, 6s: 0.850, 12s: 0.850, 30s: 0.850. The rate is derived from the target and the half life, so the coverage a breaking cell reaches no longer depends on how long foam survives.
 - **shipped configs, foam equilibrium** -- coastal_bay: t_half 6s -> 0.850; houdini_lake: t_half 3s -> 0.850; straits: t_half 3s -> 0.850; straits_crop: t_half 3s -> 0.850; test_lake: t_half 3s -> 0.850. All below the clip ceiling.
@@ -322,6 +332,7 @@ Notes:
 | smallest terrain-minus-mesh clearance onshore | 0.019997 m | -- | -- | -- | PASS |
 | analytic vs face normal angle, mean | 2.425 deg | -- | -- | -- | PASS |
 | LOD invariant at the mesh spacing | 0.046111 | 0.046111 | 3.61e-07 | 1.0e-02 | PASS |
+| surface k_max over finest mesh Nyquist, worst scene | 1.3913 x | -- | -- | 1.0e+00 | PASS |
 | lookup vs direct quadrature for sub-mesh mss | 4.7215e-04 | 0 | -- | 2.0e-02 | PASS |
 | sub-mesh mss at 3 cm depth vs deep water | 0.441373 | -- | -- | -- | PASS |
 | sub-mesh mss at 1-5 m depth vs deep water | 0 | 0 | -- | 1.0e-06 | PASS |
@@ -356,6 +367,7 @@ Notes:
 - **smallest terrain-minus-mesh clearance onshore** -- 241 vertices sit landward of the waterline. Positive means the bed is above the water mesh, so the water is hidden rather than fighting for the same pixels.
 - **analytic vs face normal angle, mean** -- p95 5.0 deg, max 11.9 deg. At 0.25 m posts the mesh barely resolves the finest spectral band, so a few degrees of disagreement is the expected cost of differencing rather than a defect.
 - **LOD invariant at the mesh spacing** -- Mesh carries 25% of the slope variance as geometry; the BSDF gets the remaining 75% as roughness (Beckmann alpha = 0.1866).
+- **surface k_max over finest mesh Nyquist, worst scene** -- coastal_bay 2.00x; houdini_lake 2.78x; straits 2.78x; straits_crop 2.78x; test_lake 1.39x. Below 1.0 the band between `k_max` and `pi/dx` is carried by neither the mesh nor the BSDF, and the LOD invariant closes against a surface that was never built. Worst is test_lake.
 - **lookup vs direct quadrature for sub-mesh mss** -- `mss_above` is a radial quadrature, far too slow per vertex, so it is interpolated over a log-spaced depth table. This bounds the interpolation error against calling it directly.
 - **sub-mesh mss at 3 cm depth vs deep water** -- kd = 0.75 there. Treating the sub-mesh share as a scene constant would understate the roughness handed to the BSDF by this much, in the one band anyone looks at.
 - **sub-mesh mss at 1-5 m depth vs deep water** -- Converged past kd ~ 2.5, so the common case costs nothing.

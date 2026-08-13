@@ -37,6 +37,7 @@ import argparse
 import json
 import sys
 import time
+import warnings
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -59,7 +60,8 @@ if str(Path(__file__).resolve().parent) not in sys.path:
 
 import make_figures as mf  # noqa: E402
 import make_overview as mo  # noqa: E402
-from pywave import __version__, load_config, moments, nearshore, spectrum  # noqa: E402
+from pywave import (__version__, load_config, moments, nearshore,  # noqa: E402
+                    spectrum, tiling)
 
 
 # ---------------------------------------------------------------------------
@@ -547,7 +549,17 @@ def main() -> int:
                          "(adds a few minutes)")
     ap.add_argument("--animate-seconds", type=float, default=5.0)
     ap.add_argument("--dpi", type=int, default=150)
+    ap.add_argument("--strict", action="store_true",
+                    help="fail instead of warning when the tile set is not "
+                         "sized for this scene's sea. Worth setting for a "
+                         "sweep, where a warning scrolls past and a whole "
+                         "batch of renders inherits the problem.")
     args = ap.parse_args()
+
+    if args.strict:
+        # Only this category. Turning every warning in the process fatal would
+        # make an unrelated DeprecationWarning from a dependency kill the run.
+        warnings.simplefilter("error", tiling.TileSizingWarning)
 
     cfg_path = Path(args.config)
     if not cfg_path.exists():
@@ -566,6 +578,19 @@ def main() -> int:
     out = Path(args.out) if args.out else ROOT / "runs" / cfg.name
     out.mkdir(parents=True, exist_ok=True)
     scene = mf.Scene(cfg)
+
+    # Build the tiles now rather than on first use. Under --strict this is what
+    # turns a bad tile set into an immediate exit instead of a traceback several
+    # minutes into a run that was never going to be usable.
+    try:
+        scene.tileset
+    except tiling.TileSizingWarning as exc:
+        print(f"\n  refusing to run --strict: {exc}\n\n"
+              f"  The tiles in {cfg_path.name} are not sized for this scene's "
+              f"sea.\n"
+              f"  Set `size: auto` on the lower-band tiles and they will follow\n"
+              f"  lambda_p; see docs/tile_autosizing.md.", file=sys.stderr)
+        return 2
 
     print(f"  {cfg.wind.speed:g} m/s toward {cfg.wind.direction_deg:g} deg, "
           f"fetch {cfg.wind.fetch:g} m")

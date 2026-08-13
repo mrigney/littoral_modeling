@@ -313,6 +313,56 @@ Resizing on that rule is a **redistribution, not a different sea**: on
 `straits_crop`, moving band 1 from 99.7% to 82.5% left `Hs`, `k_max` and resolved
 `mss` unchanged to four decimals. Safe to apply to a scene you have validated.
 
+#### Let it size them for you: `size: auto`
+
+You do not have to do rules 1 and 2 by hand, and for a sweep you should not —
+they have to be redone for every sea state, and getting them wrong is silent.
+Write `auto` instead of a number on the **lower-band** tiles:
+
+```yaml
+surface:
+  tiles:
+    - {size: auto, n: 512, band: [0.0, 0.35]}
+    - {size: auto, n: 256, band: [0.35, 0.7]}
+    - {size: 23.0, n: 256, band: [0.7, 1.0]}   # k_max: your call, not the sea's
+```
+
+Those two sizes are then derived from this scene's own `λp` so the first band
+edge lands at 2 `k_p` — exactly, at every sea state. One config file now covers
+a whole windspeed/fetch sweep, and the band split does not drift across it.
+
+**The top tile stays a number**, and that is the point of the split in the table
+above: it sets `k_max`, which is a rendering decision. Letting it follow `λp`
+coarsens its grid — on `straits` that dropped `k_max` from 35.0 to 9.1 rad/m and
+moved 36% of the resolved slope variance out of the mesh and into BSDF
+roughness. An all-`auto` set is refused at load, as is an `auto` tile sitting
+above a pinned one.
+
+Configs that spell out every size are untouched, so nothing existing changes.
+
+Two limits worth knowing. The derivation is exact while the pinned top tile
+stays compatible with the derived ones — for a 23 m / 256 top tile that is `λp`
+from about 1.0 m to 92 m, which covers any realistic littoral sea. Outside it
+you get an error naming the minimum workable `λp`, not a quietly wrong split.
+And the sizes come out irrationally related on purpose (rule 3), so they never
+re-align.
+
+#### When it is wrong, it says so
+
+`TileSet.build` warns — `TileSizingWarning` — whenever the set it just built is
+not sized for its sea, whether you wrote the numbers or not. For a sweep, where
+a warning scrolls past and a whole batch of renders inherits the problem:
+
+```bash
+python scripts/run_scene.py configs/my_sweep.yaml --strict
+```
+
+`--strict` turns that warning into an exit code 2 before any work is done. Each
+run also records its sizing in `summary.json`, and
+`scripts/collect_run_info.py` prints a **Tile sizing** table across a whole
+directory of runs with a verdict per run — which is how you answer "was that
+batch actually sized right?" after the fact.
+
 Two things that are *not* reasons to resize:
 
 - **Tile size does not affect accuracy.** Holding the Nyquist fixed and growing
