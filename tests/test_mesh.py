@@ -168,6 +168,60 @@ def test_lod_invariant_holds_at_the_mesh_spacing(record, meshed, cfg, scene):
     assert abs(float(np.median(m.channels["mss"])) - sub) / sub < 0.05
 
 
+def test_every_scene_synthesises_past_its_finest_mesh(record):
+    """`k_max` must clear `pi/dx` for the finest mesh that will sample it.
+
+    The test above checks the identity at an *idealised* mesh: it splits the
+    spectrum at `pi/dx` and confirms the halves sum. It never asks whether the
+    surface actually reaches `pi/dx`. If it does not, both halves are still
+    computed from the analytic spectrum and still sum -- the identity closes
+    against a surface that was never built.
+
+    That is the failure this catches. `submesh_mss` hands the BSDF
+    `mss_above(pi/dx)`, i.e. "everything the mesh could not resolve". When the
+    tile set stops at `k_max < pi/dx`, the band `[k_max, pi/dx]` is in neither
+    place: not in the geometry, because no tile synthesised it, and not in the
+    roughness, because the BSDF was told the mesh had it covered.
+
+    Measured on `coastal_bay` before its third tile was resized: `k_max` 4.383
+    against a mesh Nyquist of 6.283, losing 4.77% of the total slope variance,
+    reading Beckmann alpha 4.2% low, and degrading LOD closure from 1.4e-04 to
+    4.8e-02.
+
+    The opposite direction -- surface finer than mesh -- is fine and expected;
+    `TileSet.band_limited` removes the excess before sampling so it aliases
+    into nothing. Only this direction is unguarded.
+    """
+    from pywave import load_config, tiling
+
+    repo_root = Path(__file__).resolve().parent.parent
+    configs = sorted((repo_root / "configs").glob("*.yaml"))
+    assert configs, "no configs discovered -- the glob is wrong, not the scenes"
+
+    worst_name, worst_ratio, rows = "", np.inf, []
+    for path in configs:
+        cfg_i = load_config(path)
+        ts = tiling.TileSet.build(cfg_i)
+        finest = min([cfg_i.output.mesh_dx] + [r.dx for r in cfg_i.output.lod_rings])
+        k_mesh = np.pi / finest
+        ratio = ts.k_max / k_mesh
+        rows.append(f"{path.stem} {ratio:.2f}x")
+        if ratio < worst_ratio:
+            worst_name, worst_ratio = path.stem, ratio
+        assert ratio >= 1.0, (
+            f"{path.stem}: k_max {ts.k_max:.3f} < mesh Nyquist {k_mesh:.3f} "
+            f"(finest dx {finest} m). The band between them is in neither the "
+            f"geometry nor the BSDF -- shrink the top tile or raise its n.")
+
+    record("6", "surface k_max over finest mesh Nyquist, worst scene",
+           worst_ratio, tol=1.0, unit="x",
+           note=f"{'; '.join(rows)}. Below 1.0 the band between `k_max` and "
+                f"`pi/dx` is carried by neither the mesh nor the BSDF, and the "
+                f"LOD invariant closes against a surface that was never built. "
+                f"Worst is {worst_name}.",
+           passed=worst_ratio >= 1.0)
+
+
 def test_submesh_mss_tracks_depth_in_the_surf_band(record, cfg):
     """The sub-mesh share is a scene constant offshore and is not, inshore.
 

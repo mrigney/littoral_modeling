@@ -34,15 +34,23 @@ surface:
   #   tiles 1-2  set where the bands split. Their Nyquists fix k_ref, and the
   #              first edge is 0.35*k_ref -- aim for 1.5-3 k_p. Here 2.00.
   #   tile 3     sets the top of the resolved range, and therefore where the
-  #              mesh/BSDF handoff lands. Left alone so k_max stays 4.38.
+  #              mesh/BSDF handoff lands. It must clear the finest mesh.
   #
-  # Sizes stay incommensurate (1583/719 = 2.20, 719/367 = 1.96).
-  # Variance now splits 82.5/12.7/4.8 rather than 97.3/2.1/0.6, with Hs, k_max
-  # and mss unchanged -- and tiles 1 and 2 got cheaper, not dearer.
+  # Tile 3 was 367 m, held there to keep k_max fixed through an earlier resize.
+  # Preserving k_max through a resize is the right rule, but nobody checked the
+  # value being preserved: at 367 m, k_max was 4.38 rad/m against a mesh Nyquist
+  # of pi/0.5 = 6.28. The band between them was in neither the geometry nor the
+  # BSDF -- 4.77% of the total slope variance, Beckmann alpha reading 4.2% low.
+  #
+  # 128 m at n=512 puts k_max at 12.57, twice the mesh Nyquist, so
+  # `band_limited` has margin to cut cleanly at every LOD ring.
+  #
+  # Sizes stay incommensurate (1583/719 = 2.20, 719/128 = 5.62).
+  # Variance splits 82.4/12.7/4.9; Hs and the band structure are unchanged.
   tiles:
     - {size: 1583.0, n: 512, band: [0.0, 0.35]}
     - {size: 719.0, n: 256, band: [0.35, 0.7]}
-    - {size: 367.0, n: 512, band: [0.7, 1.0]}
+    - {size: 128.0, n: 512, band: [0.7, 1.0]}
   choppiness: 1.0
 
 bathymetry:
