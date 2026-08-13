@@ -42,6 +42,8 @@ def _rows(run: Path):
     # reporting when one is missing -- so every lookup has a fallback.
     sc, sp = s.get("scene", {}), s.get("spectrum", {})
     ba = s.get("bathymetry", {})
+    sz = s.get("surface", {}).get("sizing", {})
+    lo = s.get("lod", {})
     lam = sp.get("lambda_p_m")
     if lam is None:
         return []
@@ -56,6 +58,15 @@ def _rows(run: Path):
         "Tp_s": sp.get("T_p_s", float("nan")),
         "bathy_dx": ba.get("dx"),
         "source": ba.get("source", "?"),
+        # Tile sizing. Absent from runs made before it was recorded, which is
+        # why every one of these falls back rather than raising.
+        "first_edge_over_k_p": sz.get("first_edge_over_k_p"),
+        "band_shares": sz.get("band_shares"),
+        "largest_over_lambda_p": sz.get("largest_tile_over_lambda_p"),
+        "bands_are_inert": sz.get("bands_are_inert"),
+        "sizing_notes": sz.get("notes", []),
+        "k_max_ratio": lo.get("k_max_over_finest_nyquist"),
+        "finest_dx": lo.get("finest_dx_m"),
     }
     metas = sorted((run / "mesh").glob("water_*.json")) if (run / "mesh").exists() else []
     if not metas:
@@ -121,6 +132,49 @@ def main() -> int:
 
     L.append("\n> `posts/λp` is the number that governs how the water looks: "
              "≳16 good, ~8 acceptable, ~4 visibly patterned, ≲2 pure moiré.\n")
+
+    # Tile sizing gets its own table rather than more columns on the one above,
+    # which is already eleven wide. This is the section that answers "was this
+    # run's tile set actually sized for its own sea?" -- the question a sweep
+    # cannot answer retroactively from the configs, because they may have moved.
+    if any(r.get("first_edge_over_k_p") is not None for r in rows):
+        L.append("## Tile sizing\n")
+        L.append("| run | **λp** | **1st edge** | band shares | largest tile | "
+                 "**k_max / finest ν** | verdict |")
+        L.append("|---|---|---|---|---|---|---|")
+        for r in rows:
+            fe = r.get("first_edge_over_k_p")
+            if fe is None:
+                L.append(f"| {r['run']} | {r['lambda_p_m']:.2f} m | — | — | — | — | "
+                         "run predates sizing record |")
+                continue
+            shares = r.get("band_shares") or []
+            sh = " / ".join(f"{x:.2f}" for x in shares) if shares else "—"
+            lt = (f"{r['largest_over_lambda_p']:.1f} λp"
+                  if r.get("largest_over_lambda_p") else "—")
+            km = r.get("k_max_ratio")
+            kms = f"**{km:.2f}×**" if km is not None else "—"
+            bad = []
+            if r.get("bands_are_inert"):
+                bad.append("bands inert")
+            if not (1.5 <= fe <= 3.0):
+                bad.append(f"edge {fe:.1f} k_p outside 1.5–3")
+            if km is not None and km < 1.0:
+                bad.append("k_max below finest mesh")
+            verdict = "OK" if not bad else "**" + "; ".join(bad) + "**"
+            L.append(f"| {r['run']} | {r['lambda_p_m']:.2f} m | {fe:.2f} k_p | "
+                     f"{sh} | {lt} | {kms} | {verdict} |")
+
+        L.append("\n> `1st edge` is where band 1 stops, in units of the peak "
+                 "wavenumber; aim for 1.5–3 k_p. Push it far above the peak and "
+                 "band 1 swallows the spectrum, so the disjoint bands cost an "
+                 "FFT each and compute one representative frequency between "
+                 "them. `k_max / finest ν` below 1.0 means slope variance is "
+                 "carried by neither the mesh nor the BSDF.\n")
+
+        for r in rows:
+            for note in r.get("sizing_notes") or []:
+                L.append(f"> **{r['run']}:** {' '.join(note.split())}\n")
 
     L.append("## Detail\n")
     for r in rows:
