@@ -31,6 +31,32 @@ arguably a feature; §7 records it as an open question rather than solving it.
 
 ---
 
+## 0a. Reading the numbers
+
+Two normalizations appear throughout, and they run in opposite directions.
+
+- **Lengths are in units of λ_p.** "largest tile 44.8 λ_p" means the tile's
+  *physical side length* is 44.8 peak wavelengths — `coastal_bay`'s largest tile
+  is 1583 m across a 35.3 m sea. It is not a statement about resolution.
+- **Wavenumbers are in units of k_p.** Band edges and `k_max` — "first edge at
+  2.0 k_p" — are spectral positions relative to the peak.
+
+Since `λ_p = 2π/k_p` these are reciprocal, and for one tile at fixed `n`:
+
+```
+(L / λ_p) × (k_nyquist / k_p) = n / 2
+```
+
+`coastal_bay` tile 1: 44.8 × 5.7 = 256 = 512/2.
+
+That identity is the whole tension in one line. **At fixed `n`, a tile cannot
+get bigger without its Nyquist getting proportionally coarser.** Which is
+desirable for tile 1 — the coarsening is what pulls `k_ref` down so the band
+edges track k_p (§3) — and destructive for the top tile, where it drags `k_max`
+down and moves resolved slope variance into the BSDF (§3a).
+
+---
+
 ## 1. Two failures, and the visible one is the milder one
 
 Measured with `TileSet.sizing()` on the shipped configs:
